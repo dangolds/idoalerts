@@ -23,13 +23,15 @@
 
 ---
 
-## D3 — Go directive: floor at 1.22, accept any toolchain ≥ 1.22 (Story 1, 2026-04-13)
+## D3 — Go directive: floor at `go 1.22` (Story 1, 2026-04-13)
 
-**Decision:** Declared `go 1.22` — the minimum floor per design §9.6's mux pattern-matching requirement. Dep-auto-bumps (validator declares `go 1.25.0`) are a *maintainer* minimum, not a language-feature requirement; we explicitly re-pin to the design floor post-`go get` / post-`tidy`.
+**Decision:** `go.mod` declares `go 1.22` — the minimum floor per design §9.6's mux pattern-matching requirement. Dep-auto-bumps (validator v10 declares `go 1.25.0`) are a **maintainer** minimum, not a language-feature requirement; we explicitly re-pin to the design floor post-`go get` / post-`tidy`.
 
-**Why:** Design §9.6 requires `>= 1.22`. Oversight flagged a portability concern: hardcoding `go 1.25.0` would force any reviewer on Go 1.22–1.24 into a toolchain auto-download just to try this assignment. Keeping the floor at 1.22 lets any compatible toolchain build without surprises; mux behavior is identical on 1.22 through 1.25+.
+**Why:** Portability. A reviewer on Go 1.22–1.24 shouldn't hit a toolchain auto-download just to try the assignment. The floor is 1.22 because that's where `METHOD /path` mux patterns became valid (§9.6). Keeping the floor at 1.22 costs nothing behaviorally — the local 1.25.x toolchain compiles against `go 1.22` directive fine.
 
-**Corollary:** Any `go mod tidy` in future stories will auto-raise the floor to 1.25.0 (validator's declared minimum). The architect on duty should `go mod edit -go=1.22` immediately after `tidy` to keep the floor at design intent. This is a 5-second step; document in the story's Implementation Notes if it trips anyone up.
+**Corollary:** Any `go mod tidy` in future stories will auto-raise the floor to 1.25.0 (validator's declared minimum). The architect on duty should `go mod edit -go=1.22` **immediately after** `tidy` to keep the floor at design intent. 5-second step; note it in the story's Implementation Notes if it trips anyone up.
+
+**Arc:** Took three commits to settle — initial `1.22`, relaxed to `1.25.0` per user override (too literal an interpretation), restored to `1.22` per oversight's portability concern. Final state matches design §9.6 and the checklist's "go 1.22 or higher" criterion simultaneously.
 
 ---
 
