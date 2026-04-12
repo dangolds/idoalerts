@@ -57,7 +57,7 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ## [ ] Phase 2: Domain Layer _(dependency: Phase 1)_
 
-### [ ] Story 2: `Alert` entity, `Status` enum, and state-predicate methods
+### [x] Story 2: `Alert` entity, `Status` enum, and state-predicate methods
 
 **As a** service-layer implementer,
 **I want** a pure-Go `Alert` aggregate with a typed status and self-describing transition predicates,
@@ -65,12 +65,22 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/domain/alert.go` defines `Alert` struct with all PRD fields: `ID`, `TenantID`, `TransactionID`, `MatchedEntityName`, `MatchScore`, `Status`, `AssignedTo` (`*string`), `DecisionNote` (`string` — not `*string`; see §9.11), `CreatedAt`, `UpdatedAt` (`time.Time`).
-- [ ] `Status` is a typed string enum with constants: `StatusOpen`, `StatusEscalated`, `StatusCleared`, `StatusConfirmedHit`. Values match the PRD wire format (`OPEN`, `ESCALATED`, `CLEARED`, `CONFIRMED_HIT`).
-- [ ] `(a *Alert) CanDecide() bool` returns true iff status is `OPEN` **or** `ESCALATED` (per clarified state machine — §2.1).
-- [ ] `(a *Alert) CanEscalate() bool` returns true iff status is `OPEN`.
-- [ ] `(a *Alert) Clone() *Alert` performs the deep copy described in §9.7 — copies value fields and allocates a fresh backing string for `AssignedTo` if non-nil.
-- [ ] No imports outside stdlib. No logger, no context. Pure data + predicates.
+- [x] `internal/domain/alert.go` defines `Alert` struct with all PRD fields: `ID`, `TenantID`, `TransactionID`, `MatchedEntityName`, `MatchScore`, `Status`, `AssignedTo` (`*string`), `DecisionNote` (`string` — not `*string`; see §9.11), `CreatedAt`, `UpdatedAt` (`time.Time`).
+- [x] `Status` is a typed string enum with constants: `StatusOpen`, `StatusEscalated`, `StatusCleared`, `StatusConfirmedHit`. Values match the PRD wire format (`OPEN`, `ESCALATED`, `CLEARED`, `CONFIRMED_HIT`).
+- [x] `(a *Alert) CanDecide() bool` returns true iff status is `OPEN` **or** `ESCALATED` (per clarified state machine — §2.1).
+- [x] `(a *Alert) CanEscalate() bool` returns true iff status is `OPEN`.
+- [x] `(a *Alert) Clone() *Alert` performs the deep copy described in §9.7 — copies value fields and allocates a fresh backing string for `AssignedTo` if non-nil.
+- [x] No imports outside stdlib. No logger, no context. Pure data + predicates.
+
+**Implementation Notes (2026-04-13):**
+
+- Files touched: `alert-service/internal/domain/alert.go` (created); `alert-service/internal/domain/.keep` (removed — directory now has real code).
+- Status consts declared typed (`const StatusOpen Status = "OPEN"` etc.) so callers can't pass bare strings where `Status` is expected. Plan originally said "untyped-string consts" — reviewer caught the imprecision; typed was always the intent.
+- `Clone` uses `cp := *a` plus fresh allocation for `*AssignedTo` when non-nil, verbatim §9.7. `time.Time` is a value type so shallow copy is self-contained. One-line doc comment added flagging the "keep in sync" invariant for any future slice/map/pointer fields (prevents the §2.8a pointer-trap regression).
+- `DecisionNote` kept as plain `string` per §9.11 with a 3-line field comment pinning the DTO-vs-domain asymmetry — DTO `DecideRequest.DecisionNote` stays `required`, but the domain tolerates `""` (seeded/legacy alerts). A future dev should not "fix" this to `*string`.
+- No constructors, no factories, no `String()` method on `Status`, no validation. Service layer owns UUID + timestamps (§2.8); DTO layer owns field-presence validation (§2.9a). Entity stays naked data + pure predicates — §2.1 line held.
+- Gemini (via oversight) suggested two bonus patterns: `NewAlert(...) (*Alert, error)` factory and richer `a.Decide(...)` / `a.Escalate(...)` transition methods on the entity. **Both explicitly rejected** — they collide with §2.1's "pure predicates on entity, orchestration in service" rule and would duplicate DTO/service responsibilities. Flagged here so future readers know the tradeoff was considered, not overlooked.
+- `go build ./...` + `go vet ./...` clean from `alert-service/`. `go.mod` floor still `go 1.22` (no `tidy` run — no new deps).
 
 ---
 
