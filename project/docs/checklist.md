@@ -84,7 +84,7 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ---
 
-### [ ] Story 3: Domain error sentinels
+### [x] Story 3: Domain error sentinels
 
 **As a** service + API-layer implementer,
 **I want** named error values I can compare with `errors.Is`,
@@ -92,9 +92,18 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/domain/errors.go` defines sentinel errors: `ErrNotFound`, `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`.
-- [ ] Each is a plain `errors.New(...)` sentinel — no custom types needed for MVP.
-- [ ] Comment above `ErrTenantMismatch` explains it is **never** surfaced to the client — the repo returns `ErrNotFound` for cross-tenant reads (defense-in-depth, no existence leak; see §2.3).
+- [x] `internal/domain/errors.go` defines sentinel errors: `ErrNotFound`, `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`.
+- [x] Each is a plain `errors.New(...)` sentinel — no custom types needed for MVP.
+- [x] Comment above `ErrTenantMismatch` explains it is **never** surfaced to the client — the repo returns `ErrNotFound` for cross-tenant reads (defense-in-depth, no existence leak; see §2.3).
+
+**Implementation Notes (2026-04-13):**
+
+- File: `alert-service/internal/domain/errors.go` (created). Stdlib `errors` only.
+- Four `errors.New` sentinels in a single `var ( ... )` block. Messages lowercase with no trailing punctuation per Go idiom, worded to mirror §2.3's response-table `message` field so the HTTP layer (Story 11) can reuse them verbatim.
+- Order: `ErrNotFound` → `ErrAlreadyDecided` → `ErrInvalidTransition` → `ErrTenantMismatch`. Not alphabetical — reads top-to-bottom as "common HTTP-facing first, internal-only last." The two 409-mapped sentinels are adjacent for scanability.
+- `ErrTenantMismatch` doc comment (adopted verbatim from reviewer wording) names both §2.3 and §2.8a, and calls out "future policy hooks" as the reason to keep it as a distinct sentinel instead of folding into `ErrNotFound`. Kept as internal signal only — repository layer (Story 6) will collapse it to `ErrNotFound` at the boundary.
+- No custom error types, no `fmt.Errorf` wrapping, no error codes, no `init()`, no helpers. Pure declarations.
+- `go build ./...` + `go vet ./...` clean from `alert-service/`.
 
 ---
 
