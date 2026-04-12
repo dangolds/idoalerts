@@ -107,7 +107,7 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ---
 
-### [ ] Story 4: Event types and `Event` marker interface
+### [x] Story 4: Event types and `Event` marker interface
 
 **As a** publisher + service-layer implementer,
 **I want** typed event structs with a shared marker interface,
@@ -115,11 +115,22 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/domain/events.go` defines `Event` interface: `EventName() string`.
-- [ ] `AlertDecidedEvent` struct with JSON tags exactly as §2.7b: `event` (literal `"alert.decided"`), `alertId`, `tenantId`, `decision`, `timestamp`. Note: field is `decision`, **not** `status` — the PRD example is authoritative.
-- [ ] `AlertEscalatedEvent` struct with JSON tags: `event` (`"alert.escalated"`), `alertId`, `tenantId`, `timestamp`.
-- [ ] Both structs implement `EventName()` returning their respective `event` string constants.
-- [ ] `Timestamp` is `string` (formatted at publish time in the service layer, RFC3339), not `time.Time` — see §9.4 / §9.13.
+- [x] `internal/domain/events.go` defines `Event` interface: `EventName() string`.
+- [x] `AlertDecidedEvent` struct with JSON tags exactly as §2.7b: `event` (literal `"alert.decided"`), `alertId`, `tenantId`, `decision`, `timestamp`. Note: field is `decision`, **not** `status` — the PRD example is authoritative.
+- [x] `AlertEscalatedEvent` struct with JSON tags: `event` (`"alert.escalated"`), `alertId`, `tenantId`, `timestamp`.
+- [x] Both structs implement `EventName()` returning their respective `event` string constants.
+- [x] `Timestamp` is `string` (formatted at publish time in the service layer, RFC3339), not `time.Time` — see §9.4 / §9.13.
+
+**Implementation Notes (2026-04-13):**
+
+- Files touched: `alert-service/internal/domain/events.go` (created); `project/docs/gotchas.md` (created — new living doc per cross-session durability rule).
+- `EventName()` returns a **literal const**, not the `e.Event` struct field. Reviewer-driven: compile-time constant, so type-identity cannot regress if the service forgets to populate `e.Event`. Field still holds wire value for JSON encoding; identity and payload are intentionally decoupled.
+- Package-level consts `EventNameAlertDecided` / `EventNameAlertEscalated` defined once in `events.go`, reused by (a) the `EventName()` methods and (b) Story 7 service struct-literal construction — single source of truth. `EventName` prefix (not `Event`) so names don't read as type names.
+- Both events use value receivers with unused receiver names dropped: `func (AlertDecidedEvent) EventName() string`. Events are immutable value types.
+- Inline in-file guard comments adopted verbatim from oversight: `// json key is "decision" per PRD — do NOT rename to "status"` on `AlertDecidedEvent.Decision`; `// RFC3339 string, populated at publish time in service — do NOT switch to time.Time` on both Timestamp fields. Muscle-memory hazards for next respawn.
+- No constructor functions. Service constructs via struct literal: `domain.AlertDecidedEvent{Event: domain.EventNameAlertDecided, ...}` — naked domain preserved per §2.1.
+- `project/docs/gotchas.md` seeded with 4 entries under `## Domain Events`: §2.7b (decision vs status), §9.4/§9.13 (publish-time RFC3339 string), §9.2 (typed Event marker over any), §2.7a (stdout/stderr split — preview tag, bites at Story 8). Three-field format per team-lead: **Trap** / **What we did** / **If you're tempted to change this**, newest-first.
+- `go build ./...` + `go vet ./...` clean from `alert-service/`.
 
 ---
 
