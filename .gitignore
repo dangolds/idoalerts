@@ -34,3 +34,4 @@ go.work.sum
 # Claude Code local config
 .claude/
 claude-yolo.sh
+project/docs/instructions/
