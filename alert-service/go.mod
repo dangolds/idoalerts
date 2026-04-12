@@ -1,6 +1,6 @@
 module github.com/dan/fincom/alert-service
 
-go 1.22
+go 1.25.0
 
 require (
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
