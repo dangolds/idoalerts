@@ -1,4 +1,4 @@
-module github.com/dan/fincom/alert-service
+module github.com/dangolds/idoalerts/alert-service
 
 go 1.25.0
 
