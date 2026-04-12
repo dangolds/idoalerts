@@ -1,6 +1,6 @@
 module github.com/dangolds/idoalerts/alert-service
 
-go 1.25.0
+go 1.22
 
 require (
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect

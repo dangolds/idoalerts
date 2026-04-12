@@ -23,13 +23,13 @@
 
 ---
 
-## D3 — Go directive: track-whatever-`go get`-produces, min 1.22 (Story 1, 2026-04-13)
+## D3 — Go directive: floor at 1.22, accept any toolchain ≥ 1.22 (Story 1, 2026-04-13)
 
-**Decision:** `go.mod` go directive is **not manually pinned** to a specific version. Accepted `go 1.25.0` as produced by `go get github.com/go-playground/validator/v10`. Minimum is 1.22 for mux pattern-matching per design §9.6.
+**Decision:** Declared `go 1.22` — the minimum floor per design §9.6's mux pattern-matching requirement. Dep-auto-bumps (validator declares `go 1.25.0`) are a *maintainer* minimum, not a language-feature requirement; we explicitly re-pin to the design floor post-`go get` / post-`tidy`.
 
-**Why:** Design §9.6 requires `>= 1.22`, not exact `1.22`. Fighting the auto-bump (validator v10 declares `go 1.25.0`) adds friction with no runtime benefit — mux behavior is identical on 1.22 through 1.25+. Per user override, stop fighting the pin.
+**Why:** Design §9.6 requires `>= 1.22`. Oversight flagged a portability concern: hardcoding `go 1.25.0` would force any reviewer on Go 1.22–1.24 into a toolchain auto-download just to try this assignment. Keeping the floor at 1.22 lets any compatible toolchain build without surprises; mux behavior is identical on 1.22 through 1.25+.
 
-**Corollary:** Later stories (notably Story 11's `go mod tidy` + `validator` import) will let the pin drift naturally with deps. Do **not** re-pin manually.
+**Corollary:** Any `go mod tidy` in future stories will auto-raise the floor to 1.25.0 (validator's declared minimum). The architect on duty should `go mod edit -go=1.22` immediately after `tidy` to keep the floor at design intent. This is a 5-second step; document in the story's Implementation Notes if it trips anyone up.
 
 ---
 
