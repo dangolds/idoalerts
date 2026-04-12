@@ -29,9 +29,9 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ---
 
-## [ ] Phase 1: Project Scaffolding
+## [x] Phase 1: Project Scaffolding
 
-### [ ] Story 1: Initialize Go module and directory skeleton
+### [x] Story 1: Initialize Go module and directory skeleton
 
 **As a** backend engineer,
 **I want** the module, dependencies, and empty package directories in place,
@@ -39,17 +39,19 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `go.mod` exists at the chosen repo root (design doc suggests `/alert-service/`; pick one location and stick with it).
-- [ ] `go.mod` declares **`go 1.22`** (non-negotiable — Go 1.22 mux pattern-matching depends on it; see §9.6 of the design doc).
-- [ ] Dependencies present in `go.mod`: `github.com/google/uuid`, `github.com/go-playground/validator/v10`. Nothing else (no web frameworks, no logging libs — `log/slog` is stdlib).
-- [ ] Directory skeleton matches design doc §3 exactly: `cmd/server/`, `internal/{domain,service,storage/memory,events,api}/`. Empty `.keep` files are fine; no Go files yet.
-- [ ] `go build ./...` exits 0 (trivially, with zero Go files).
+- [x] `go.mod` exists at the chosen repo root (design doc suggests `/alert-service/`; pick one location and stick with it).
+- [x] `go.mod` declares **`go 1.22`** (non-negotiable — Go 1.22 mux pattern-matching depends on it; see §9.6 of the design doc).
+- [x] Dependencies present in `go.mod`: `github.com/google/uuid`, `github.com/go-playground/validator/v10`. Nothing else (no web frameworks, no logging libs — `log/slog` is stdlib).
+- [x] Directory skeleton matches design doc §3 exactly: `cmd/server/`, `internal/{domain,service,storage/memory,events,api}/`. Empty `.keep` files are fine; no Go files yet.
+- [x] `go build ./...` exits 0 (trivially, with zero Go files).
 
-<!--
-**Implementation Notes (YYYY-MM-DD):**
-> **Deviation from plan:** [...]
-> **Files created/modified:** [...]
-> **Design decisions:** [...]
+**Implementation Notes (2026-04-13):**
+- **Files created:** `alert-service/go.mod`, `alert-service/go.sum`, `alert-service/cmd/server/.keep`, `alert-service/internal/domain/.keep`, `alert-service/internal/service/.keep`, `alert-service/internal/storage/memory/.keep`, `alert-service/internal/events/.keep`, `alert-service/internal/api/.keep`.
+- **Module path:** `github.com/dan/fincom/alert-service` — **placeholder**; no remote confirmed. Safe to rename pre-Phase 2 via `go mod edit -module <new>` (no source files yet = no import updates).
+- **go 1.22 pin — gotcha:** local toolchain was `go1.25.5`. `go mod init` stamped `go 1.25.X` (+ toolchain directive), and then `go get github.com/go-playground/validator/v10` re-bumped to `go 1.25.0` because **validator v10.30.2's own go.mod declares `go 1.25.0`** as its minimum. Ran `go mod edit -go=1.22 -toolchain=none` **after** all `go get` commands to restore the pin. Smoke-tested with a throwaway `go run -mod=mod smoketest.go` importing both `validator/v10` and `uuid` — both compile and run cleanly under the `go 1.22` directive, confirming validator's source doesn't use Go 1.25-only language features; the `go 1.25.0` in validator's go.mod is the maintainer's build-env minimum, not a language requirement. **Important caveat:** any `go mod tidy` run by later stories (Story 11 imports validator for real) will re-bump the pin. The fix is to re-run `go mod edit -go=1.22 -toolchain=none` after every `go mod tidy`, or accept the bump and update this pin then. Story 11 owner: be aware.
+- **Design decisions:** `alert-service/` subdir (Option A) over repo root — mirrors design §3 verbatim, isolates Go code from `project/docs/`, LICENSE, claude-yolo.sh. `.keep` files over `doc.go` — team-lead override on Gemini/oversight suggestion; `doc.go` is idiomatic but premature for empty packages and forces a `main()` stub in `cmd/server/` that Story 17 will replace.
+- **Deviation from plan:** None material. Plan said "will edit go-pin if needed"; the reviewer pre-empted this by making the edit unconditional (correct — local toolchain 1.25 guarantees the bump). The `go get validator` re-bump was a mid-implementation surprise flagged to team-lead; resolved by option (C) — force-re-pin after `go get` + smoke-test the actual validator import.
+- **Next-story handoff:** Module is live at `alert-service/`. All subsequent `go` / `make` / `git` commands for Go code run from inside `alert-service/`. Story 2 (Alert entity) targets `alert-service/internal/domain/alert.go` — replace `.keep` there with real code. When Story 11 imports validator and `go mod tidy` is run, expect the `go 1.22` pin to get bumped to `go 1.25.0`; re-run `go mod edit -go=1.22 -toolchain=none` immediately after.
 -->
 
 ---
@@ -309,15 +311,19 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 - [ ] All mutating handlers apply `http.MaxBytesReader(w, r.Body, 1<<20)` + `dec.DisallowUnknownFields()` (§9.10).
 - [ ] Validator errors → 400 `VALIDATION_ERROR`; domain errors routed through `mapDomainErr`.
 - [ ] Empty list returns `{"alerts": []}`, not `{"alerts": null}` — use `make([]*AlertResponse, 0)` at the mapping step (§9.1).
+- [ ] `minScore` that fails `strconv.ParseFloat`, or parses to a value outside `[0, 100]`, returns **400 `VALIDATION_ERROR`** — never 500, never silently ignored.
+- [ ] `status` that is not one of `OPEN`, `ESCALATED`, `CLEARED`, `CONFIRMED_HIT` returns **400 `VALIDATION_ERROR`**.
+- [ ] Missing `tenantId` also returns **400 `VALIDATION_ERROR`** (restated here alongside the other query-param error paths for symmetry).
+- [ ] Handlers pass `r.Context()` (never `context.Background()`) to every service method — request-ID, deadlines, and cancellation signals must propagate service → repo → publisher (§2.2, non-negotiable).
 
 **Execution Tasks:**
 
 1. **Handler struct + constructor.** Hold service, validator, logger.
 2. **`Create` handler.** `MaxBytesReader` + `DisallowUnknownFields` decode → `validator.Struct` → `service.CreateAlert` → 201 with `toAlertResponse`.
-3. **`List` handler.** Parse `tenantId` (required — 400 on missing), `status` (optional, must be one of the four enum values), `minScore` (optional, `strconv.ParseFloat`, must be 0–100). Build `ListFilter` with typed pointers. Call service. Map each alert, return `{"alerts": [...]}` with the empty-slice fix.
+3. **`List` handler.** Parse `tenantId` (required — 400 on missing), `status` (optional, must be one of the four enum values), `minScore` (optional, `strconv.ParseFloat`, must be 0–100). Build `ListFilter` with typed pointers. Call service. Map each alert, return `{"alerts": [...]}` with the empty-slice fix. On **any** parse or enum-validation failure, return 400 `VALIDATION_ERROR` via `writeError` — do not let `strconv` errors bubble up to the recovery middleware as 500s.
 4. **`Decide` handler.** `r.PathValue("id")`, decode + validate `DecideRequest`, call `service.DecideAlert`, return 200 with response.
 5. **`Escalate` handler.** Same shape as decide but with `EscalateRequest` and `service.EscalateAlert`.
-6. **Validator once, not per-request.** Instantiate `validator.New()` at handler construction and reuse — it is goroutine-safe and has internal caches.
+6. **Validator once, not per-request.** Instantiate `validator.New()` at handler construction and reuse — it is goroutine-safe and has internal caches. Similarly, every `svc.Xxx(...)` call takes `r.Context()` as its first arg — the middleware-seeded request ID must reach the publisher's log lines on failure, and a client disconnect should cancel downstream work (§2.2, non-negotiable).
 
 ---
 
@@ -376,15 +382,19 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 - [ ] Uses `signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)` for the shutdown trigger.
 - [ ] On shutdown signal: creates a **separate** 10-second context (`context.WithTimeout(context.Background(), 10*time.Second)`) and calls `srv.Shutdown(ctx)` — **not** the signal context (§9.3, that one is already cancelled).
 - [ ] Logs "server started on :PORT" at INFO level **to stderr**, not stdout.
-- [ ] Any `ListenAndServe` error other than `http.ErrServerClosed` is logged at ERROR and exits non-zero.
+- [ ] `ListenAndServe` runs in a goroutine that publishes its return value to a buffered `errCh := make(chan error, 1)`.
+- [ ] Main goroutine uses `select { case <-ctx.Done(): ... case err := <-errCh: ... }` to race the signal context against early server failure (e.g., port already in use).
+- [ ] On `errCh` path with a non-`ErrServerClosed` error: log at ERROR, `os.Exit(1)` — do **not** attempt graceful shutdown (the server never started, there is nothing to drain).
+- [ ] On `ctx.Done()` path: proceed to graceful shutdown with the separate 10-second context.
+- [ ] Verified behaviorally: running a second instance while the first is bound to `:8080` causes instance 2 to exit non-zero within milliseconds, not hang waiting for a signal.
 
 **Execution Tasks:**
 
 1. **Config + logger.** Read env vars, parse log level (string → `slog.Level`), construct `slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})` → `slog.New(handler)`.
 2. **Wire dependencies.** `memory.NewAlertRepo()` → `events.NewStdoutPublisher()` → `service.NewAlertService(repo, pub, logger)` → `api.NewHandler(svc, logger)` → `api.NewRouter(h, logger)`.
 3. **Build `http.Server` with timeouts.** Assign mux, set all three timeouts per §9.8.
-4. **Signal-aware run loop.** `signal.NotifyContext` for SIGINT/SIGTERM. Launch `srv.ListenAndServe()` in a goroutine; block on `<-ctx.Done()`.
-5. **Graceful shutdown with a separate context.** Create `context.WithTimeout(context.Background(), 10*time.Second)`, call `srv.Shutdown(ctx)`. Log the outcome. If `ListenAndServe` returned anything other than `http.ErrServerClosed`, log ERROR and `os.Exit(1)`.
+4. **Error-channel-aware run loop.** Create `errCh := make(chan error, 1)`. Launch `go func() { errCh <- srv.ListenAndServe() }()`. `signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)` yields the signal-aware `ctx`.
+5. **Race signal against server failure with `select`.** `select { case <-ctx.Done(): /* graceful shutdown with separate 10s context */ case err := <-errCh: if errors.Is(err, http.ErrServerClosed) { return }; logger.Error("server failed to start", "err", err); os.Exit(1) }`. The `errCh` path fires when the listener fails to bind (port already in use, permission denied, etc.) — without this race, a port conflict silently deadlocks on the signal wait and the user sees a "running" process that isn't actually listening.
 
 ---
 
