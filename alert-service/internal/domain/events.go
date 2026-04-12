@@ -6,11 +6,6 @@ type Event interface {
 	EventName() string
 }
 
-const (
-	EventNameAlertDecided   = "alert.decided"
-	EventNameAlertEscalated = "alert.escalated"
-)
-
 // AlertDecidedEvent fires after a decision is persisted.
 type AlertDecidedEvent struct {
 	Event string `json:"event"` // always "alert.decided"
@@ -21,9 +16,7 @@ type AlertDecidedEvent struct {
 	Timestamp string `json:"timestamp"` // RFC3339 string, populated at publish time in service — do NOT switch to time.Time
 }
 
-// EventName returns the literal const, not e.Event — compile-time constant
-// so type-identity stays correct even if the wire field is mis-populated.
-func (AlertDecidedEvent) EventName() string { return EventNameAlertDecided }
+func (e AlertDecidedEvent) EventName() string { return e.Event }
 
 // AlertEscalatedEvent fires after an escalation is persisted.
 type AlertEscalatedEvent struct {
@@ -33,4 +26,4 @@ type AlertEscalatedEvent struct {
 	Timestamp string `json:"timestamp"` // RFC3339 string, populated at publish time in service — do NOT switch to time.Time
 }
 
-func (AlertEscalatedEvent) EventName() string { return EventNameAlertEscalated }
+func (e AlertEscalatedEvent) EventName() string { return e.Event }

@@ -124,11 +124,11 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 **Implementation Notes (2026-04-13):**
 
 - Files touched: `alert-service/internal/domain/events.go` (created); `project/docs/gotchas.md` (created — new living doc per cross-session durability rule).
-- `EventName()` returns a **literal const**, not the `e.Event` struct field. Reviewer-driven: compile-time constant, so type-identity cannot regress if the service forgets to populate `e.Event`. Field still holds wire value for JSON encoding; identity and payload are intentionally decoupled.
-- Package-level consts `EventNameAlertDecided` / `EventNameAlertEscalated` defined once in `events.go`, reused by (a) the `EventName()` methods and (b) Story 7 service struct-literal construction — single source of truth. `EventName` prefix (not `Event`) so names don't read as type names.
-- Both events use value receivers with unused receiver names dropped: `func (AlertDecidedEvent) EventName() string`. Events are immutable value types.
+- `EventName()` returns `e.Event` (field read). Wire payload and type-identity *should* be the same string by definition — coupling them through the single field prevents divergence by construction. An earlier commit (`1bacc2b`) used literal-return + package consts; team-lead reversed that call after reviewer re-evaluated: double-sourcing invites wire-vs-routing drift, and DRY does not pay for a two-call-site constant.
+- No `EventName*` package consts. Service sets `Event: "alert.decided"` / `Event: "alert.escalated"` as string literals at the two service-layer construction sites (Story 7). Grep finds both instantly; N=2 is below the DRY threshold.
+- Both events use value receivers: `func (e AlertDecidedEvent) EventName() string`. Events are immutable value types.
 - Inline in-file guard comments adopted verbatim from oversight: `// json key is "decision" per PRD — do NOT rename to "status"` on `AlertDecidedEvent.Decision`; `// RFC3339 string, populated at publish time in service — do NOT switch to time.Time` on both Timestamp fields. Muscle-memory hazards for next respawn.
-- No constructor functions. Service constructs via struct literal: `domain.AlertDecidedEvent{Event: domain.EventNameAlertDecided, ...}` — naked domain preserved per §2.1.
+- No constructor functions. Service constructs via struct literal — naked domain preserved per §2.1.
 - `project/docs/gotchas.md` seeded with 4 entries under `## Domain Events`: §2.7b (decision vs status), §9.4/§9.13 (publish-time RFC3339 string), §9.2 (typed Event marker over any), §2.7a (stdout/stderr split — preview tag, bites at Story 8). Three-field format per team-lead: **Trap** / **What we did** / **If you're tempted to change this**, newest-first.
 - `go build ./...` + `go vet ./...` clean from `alert-service/`.
 

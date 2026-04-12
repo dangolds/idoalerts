@@ -30,7 +30,7 @@ Running log of Go-idiom traps and PRD-alignment invariants that would not be obv
 
 **Trap.** Using `any` (or `interface{}`) for the publisher parameter is easy and "flexible." It also lets arbitrary structs be published, silently emitting malformed events.
 
-**What we did.** `Event` marker interface (`EventName() string`) in `internal/domain/events.go`. Each event struct implements `EventName()` returning a package-level const (`EventNameAlertDecided`, `EventNameAlertEscalated`) — literal-return, not a field read, so the identity is compile-time constant and cannot be regressed by forgetting to populate `e.Event`.
+**What we did.** `Event` marker interface (`EventName() string`) in `internal/domain/events.go`. Each event struct implements `EventName()` by returning its own `e.Event` field — the field is the single source of truth for the event name, so wire payload and type-identity cannot diverge by construction. The service sets `Event: "alert.decided"` (literal, two call sites — no package const, DRY does not pay at N=2).
 
 **If you're tempted to change this.** Relaxing to `any` trades compile-time safety for "convenience" you won't need — the event set is closed (two types) and JSON encoding works identically on a concrete struct through the interface.
 
