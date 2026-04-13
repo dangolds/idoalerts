@@ -3,7 +3,14 @@ package domain
 import "errors"
 
 var (
-	ErrNotFound          = errors.New("alert not found")
+	ErrNotFound = errors.New("alert not found")
+
+	// ErrAlreadyExists indicates a Create call collided with an existing alert ID.
+	// The repo enforces the port's "Create is for new alerts only" contract;
+	// silent overwrite would violate the port documentation committed in Story 5.
+	// HTTP mapping (future Story 12): 409 ALERT_ALREADY_EXISTS.
+	ErrAlreadyExists = errors.New("alert already exists")
+
 	ErrAlreadyDecided    = errors.New("alert has already been decided")
 	ErrInvalidTransition = errors.New("invalid state transition")
 

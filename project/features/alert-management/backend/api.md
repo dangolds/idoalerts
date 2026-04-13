@@ -98,23 +98,25 @@ Deep copy that reallocates the backing string for `*AssignedTo`. The in-memory r
 ```go
 var (
     ErrNotFound          = errors.New("alert not found")
+    ErrAlreadyExists     = errors.New("alert already exists")         // Create collision; enforces port "new alerts only" contract
     ErrAlreadyDecided    = errors.New("alert has already been decided")
     ErrInvalidTransition = errors.New("invalid state transition")
-    ErrTenantMismatch    = errors.New("tenant mismatch") // never client-surfaced; repo collapses to ErrNotFound
+    ErrTenantMismatch    = errors.New("tenant mismatch")              // never client-surfaced; repo collapses to ErrNotFound
 )
 ```
 
-All plain `errors.New` sentinels — no custom types, no codes, no wrapping at sentinel level. Service and API layers compare with `errors.Is`. The HTTP mapper (Story 14) translates to:
+All plain `errors.New` sentinels — no custom types, no codes, no wrapping at sentinel level. Service and API layers compare with `errors.Is`. The HTTP mapper (Story 12) translates to:
 
 | Sentinel | HTTP | `error` code | Notes |
 |---|---|---|---|
 | `ErrNotFound` | 404 | `ALERT_NOT_FOUND` | |
 | `ErrTenantMismatch` | 404 | `ALERT_NOT_FOUND` | Collapsed at repo boundary; never surfaces |
+| `ErrAlreadyExists` | 409 | `ALERT_ALREADY_EXISTS` | Repo Create collision — enforces port "new alerts only" contract |
 | `ErrAlreadyDecided` | 409 | `ALERT_ALREADY_DECIDED` | |
 | `ErrInvalidTransition` | 409 | `INVALID_STATE_TRANSITION` | |
 | DTO validation failures | 400 | `VALIDATION_ERROR` | Produced by validator/v10 |
 
-`ErrTenantMismatch` is kept distinct from `ErrNotFound` so the repo can log the two cases separately if needed, and so future policy hooks (e.g., cross-tenant audit logging) don't need to reshape the repository API.
+`ErrTenantMismatch` is kept distinct from `ErrNotFound` so the repo can log the two cases separately if needed, and so future policy hooks (e.g., cross-tenant audit logging) don't need to reshape the repository API. `ErrAlreadyExists` was added during Story 6 after reviewers independently caught that the original "silent overwrite in Create" plan contradicted the port doc committed in Story 5 — see that story's Implementation Notes.
 
 ## Events
 
@@ -179,7 +181,34 @@ The port doc pins only the **correctness invariants every impl must honor**: cro
 
 `ListFilter` is naked data — no constructor, no validator method. Handler parses query → builds the struct → service passes through → repo scans (O(n) for MVP). `*Status` / `*float64` make "unset" unambiguous (a typed-zero-value filter would be incorrect: `Status("")` is "no filter", not "alerts with no status"). The service layer trusts the port contract and does not re-check tenant scoping.
 
-## HTTP API (Planned — Stories 12–17)
+## In-Memory Repository
+
+`internal/storage/memory/alert_repo.go` (Story 6) — the sole current implementation of `domain.AlertRepository`, backed by a map plus an `sync.RWMutex`.
+
+```go
+type AlertRepo struct {
+    mu     sync.RWMutex
+    alerts map[string]*domain.Alert
+}
+
+func NewAlertRepo() *AlertRepo
+```
+
+**Lock discipline.** `Create` and `Update` take `mu.Lock()`; `FindByID` and `List` take `mu.RLock()`. All four methods `defer` the corresponding unlock at the top — no multi-path unlocks. All receivers are `*AlertRepo` (value receivers would copy the mutex — a classic Go trap).
+
+**Clone boundary (§2.8a).** Every lock-boundary entry and exit clones. `Create` and `Update` store `a.Clone()` (callers' pointers never alias map state). `FindByID` and `List` return `a.Clone()` (callers cannot mutate stored state outside the lock). The clone is absolute, not conditional on caller trust — the cost is one allocation per operation and the `-race` guarantee (Story 7) depends on it. Future pointer/slice/map fields on `Alert` must extend `Alert.Clone` — the "keep in sync" comment in `alert.go` enforces this.
+
+**`List` contract (§9.1, §9.12).** Pre-allocates `out := make([]*domain.Alert, 0)` before the range loop with an inline comment so a refactor to `var out []*Alert` can't silently regress the JSON contract (nil → `null` vs. `[]`). Filters before sorting (correctness: pagination semantics want the newest-matching, not matching-from-the-newest-N; performance: sort discarded entries is waste). Uses `sort.SliceStable` over `sort.Slice` for free determinism when two fast `Create` calls land on the same `CreatedAt` nanosecond.
+
+**Cross-tenant collapse.** `FindByID` and `Update` return `domain.ErrNotFound` for both "missing ID" and "ID exists under different tenant" — never leak cross-tenant existence. `ErrTenantMismatch` is deliberately never returned from this repo; it remains reserved as an internal signal for future policy hooks per the Story 3 sentinel doc.
+
+**`Create` collision.** Returns `domain.ErrAlreadyExists` if `a.ID` already lives in the map. Enforces the port contract "Create is for new alerts only; Update requires an existing row." The service generates UUIDs so natural collisions are impossible, but a retry path with a reused UUID, or a service bug passing a stored alert back into `Create`, surfaces cleanly instead of silently overwriting.
+
+**Compile-time port guard.** `var _ domain.AlertRepository = (*AlertRepo)(nil)` at file scope fails to build the moment the port drifts. No test needed.
+
+**What this repo deliberately does not expose.** No `Delete`, no `Exists`, no `CompareAndSwap`, no streaming/channel `List`, no batch APIs, no in-memory indexes on filter fields. Atomicity of compound operations (read-check-write for decisions) is the **service** layer's concern per §2.8b — this repo provides per-method atomicity only. A production DB impl would close the decide-race with `SELECT ... FOR UPDATE`; for MVP the gap is documented and accepted.
+
+## HTTP API (Planned — Stories 11–16)
 
 All endpoints emit the single error shape `{"error": "CODE", "message": "text"}` via one shared `api.writeError` helper.
 

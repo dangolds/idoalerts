@@ -20,7 +20,7 @@ The service exposes four HTTP endpoints (Go 1.22 native mux pattern matching, no
 - `PATCH /alerts/{id}/decision` — submit `CLEARED` or `CONFIRMED_HIT` with a `decisionNote`. Write-once. Returns `200` with the updated alert or `409 ALERT_ALREADY_DECIDED`.
 - `POST /alerts/{id}/escalate` — transition `OPEN` to `ESCALATED`. Returns `200` with the updated alert or `409 INVALID_STATE_TRANSITION` if not OPEN.
 
-Request validation happens at the DTO boundary via `go-playground/validator/v10`. Domain errors (`ErrNotFound`, `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`) are sentinels compared with `errors.Is` and mapped to HTTP by a single `api.writeError` helper.
+Request validation happens at the DTO boundary via `go-playground/validator/v10`. Domain errors (`ErrNotFound`, `ErrAlreadyExists`, `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`) are sentinels compared with `errors.Is` and mapped to HTTP by a single `api.writeError` helper.
 
 ## Layers
 
@@ -32,11 +32,14 @@ Only a single backend layer; no frontend, no IoT, no external persistence.
 
 **Domain layer complete** (Stories 2–5) — `internal/domain/` has:
 - `alert.go` — `Alert` struct, `Status` typed enum with four constants, `CanDecide` / `CanEscalate` predicates, `Clone` deep-copy for repo boundary. (Commit `edccd10`.)
-- `errors.go` — four `errors.New` sentinels (`ErrNotFound`, `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`). (Commit `68a8d04`.)
+- `errors.go` — five `errors.New` sentinels: `ErrNotFound`, `ErrAlreadyExists` (added during Story 6 to enforce the port's "Create is for new alerts only" contract), `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`. (Original: commit `68a8d04`; amended during Story 6.)
 - `events.go` — `Event` marker interface with `EventName() string`, plus `AlertDecidedEvent` and `AlertEscalatedEvent` structs with PRD-aligned JSON tags. (Commits `1bacc2b`, revised by `4d57190`.)
-- `ports.go` — `AlertRepository` interface (Create/FindByID/List/Update, ctx-first), `EventPublisher` interface (Publish(ctx, Event)), `ListFilter` struct (TenantID required, Status / MinScore pointer-optional). The port doc pins only correctness invariants every impl must honor (cross-tenant collapse to `ErrNotFound`); impl-flavored rules (slice-init, sort) move to the impl's package doc so future DB/channel impls aren't over-specified.
+- `ports.go` — `AlertRepository` interface (Create/FindByID/List/Update, ctx-first), `EventPublisher` interface (Publish(ctx, Event)), `ListFilter` struct (TenantID required, Status / MinScore pointer-optional). The port doc pins only correctness invariants every impl must honor (cross-tenant collapse to `ErrNotFound`); impl-flavored rules (slice-init, sort) live on the impl's package doc.
 
-**Not yet implemented** — in-memory repo (Story 6), repo tests (Story 7), stdout publisher (Story 8), service layer (Stories 9–10), API / DTOs / middleware / router (Stories 11–16), `main.go` wiring (Story 17), Makefile + README (Stories 18–19), final rubric sweep (Story 20).
+**Infrastructure layer partial** (Story 6 done) — `internal/storage/memory/` has:
+- `alert_repo.go` — thread-safe `AlertRepo` backed by `map[string]*domain.Alert` + `sync.RWMutex`. Clone-on-read/write at every lock boundary (§2.8a); `List` pre-allocates non-nil empty slice (§9.1) and sorts `CreatedAt` descending via `sort.SliceStable` (§9.12); cross-tenant `FindByID`/`Update` collapse to `ErrNotFound`; `Create` returns `ErrAlreadyExists` on ID collision. Compile-time `var _ domain.AlertRepository = (*AlertRepo)(nil)` guard catches port drift at build time.
+
+**Not yet implemented** — repo concurrency + CRUD tests (Story 7), stdout publisher (Story 8), service layer (Stories 9–10), API / DTOs / middleware / router (Stories 11–16), `main.go` wiring (Story 17), Makefile + README (Stories 18–19), final rubric sweep (Story 20).
 
 See `project/docs/checklist.md` for the full per-story breakdown and per-story Implementation Notes.
 

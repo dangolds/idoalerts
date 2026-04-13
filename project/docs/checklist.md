@@ -105,6 +105,8 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 - No custom error types, no `fmt.Errorf` wrapping, no error codes, no `init()`, no helpers. Pure declarations.
 - `go build ./...` + `go vet ./...` clean from `alert-service/`.
 
+**Amendment (2026-04-13, during Story 6):** A fifth sentinel, `ErrAlreadyExists`, was added to enforce the `AlertRepository.Create` "new alerts only" port contract (Story 5 committed that wording; the original plan's silent-overwrite behavior contradicted it). Inserted between `ErrNotFound` and `ErrAlreadyDecided` with a doc comment pointing at the future 409 `ALERT_ALREADY_EXISTS` mapping. Surfaced independently by Gemini, senior-reviewer, and oversight during Story 6 plan review — all three flagged the port-contract mismatch, not a UUID-entropy concern. See Story 6 Implementation Notes for the full chain.
+
 ---
 
 ### [x] Story 4: Event types and `Event` marker interface
@@ -164,7 +166,7 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ## [ ] Phase 3: Infrastructure _(dependency: Phase 2)_
 
-### [ ] Story 6: In-memory `AlertRepository` implementation
+### [x] Story 6: In-memory `AlertRepository` implementation
 
 **As a** service-layer implementer,
 **I want** a thread-safe, pointer-safe in-memory repo,
@@ -172,13 +174,13 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/storage/memory/alert_repo.go` defines `AlertRepo` struct with `alerts map[string]*domain.Alert` and `mu sync.RWMutex`.
-- [ ] `NewAlertRepo()` constructor returns a pointer with an initialized map.
-- [ ] Implements all four `AlertRepository` methods with context as first arg (even if unused for MVP — the interface demands it).
-- [ ] **Cross-tenant reads return `ErrNotFound`** (not `ErrTenantMismatch` to the caller — existence leak prevention, §2.3 / §4).
-- [ ] `List` returns results sorted by `CreatedAt` descending (§9.12, deterministic — map iteration is randomized).
-- [ ] `List` returns `make([]*domain.Alert, 0)` when empty, never `nil` — consumers will marshal this to JSON and `nil` → `null` breaks the contract (§9.1).
-- [ ] Tenant/status/score filtering happens in `List` before sort (O(n) scan is fine for MVP).
+- [x] `internal/storage/memory/alert_repo.go` defines `AlertRepo` struct with `alerts map[string]*domain.Alert` and `mu sync.RWMutex`.
+- [x] `NewAlertRepo()` constructor returns a pointer with an initialized map.
+- [x] Implements all four `AlertRepository` methods with context as first arg (even if unused for MVP — the interface demands it).
+- [x] **Cross-tenant reads return `ErrNotFound`** (not `ErrTenantMismatch` to the caller — existence leak prevention, §2.3 / §4).
+- [x] `List` returns results sorted by `CreatedAt` descending (§9.12, deterministic — map iteration is randomized).
+- [x] `List` returns `make([]*domain.Alert, 0)` when empty, never `nil` — consumers will marshal this to JSON and `nil` → `null` breaks the contract (§9.1).
+- [x] Tenant/status/score filtering happens in `List` before sort (O(n) scan is fine for MVP).
 
 **Execution Tasks:**
 
@@ -187,6 +189,25 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 3. **`Update` with tenant scoping + existence check.** `mu.Lock()`, look up by ID, verify tenant match, store `a.Clone()`. Missing ID or cross-tenant → `ErrNotFound`.
 4. **`List` with filter + sort + non-nil return.** `mu.RLock()`, iterate, apply `TenantID` (required), then `Status` / `MinScore` filters if set. Append clones. Sort by `CreatedAt` descending. Return slice (pre-initialize with `make` so zero matches → `[]`, not nil).
 5. **Package-level comment** explaining the clone-on-read/write invariant and pointing at §2.8a. This is the kind of non-obvious rule that earns a comment per the coding guidelines.
+
+**Implementation Notes (2026-04-13):**
+
+- Files touched: `alert-service/internal/storage/memory/alert_repo.go` (created, ~100 lines); `alert-service/internal/storage/memory/.keep` (removed — real code now lives here); `alert-service/internal/domain/errors.go` (added `ErrAlreadyExists` sentinel — see deviation below).
+- **Deviation from plan (added after review):** The original plan said "no duplicate-ID check in `Create` — UUID collision is cosmological — YAGNI." Reviewers (Gemini + senior-reviewer + oversight, **independently**) surfaced that the plan contradicted the port doc committed in Story 5 ("Create is for new alerts only; Update requires an existing row"). A retry path with a reused UUID, or a service bug passing a stored alert back into `Create`, would silently corrupt state. Fix: new `ErrAlreadyExists` sentinel in `domain/errors.go` (between `ErrNotFound` and `ErrAlreadyDecided`), repo enforces via `if _, exists := r.alerts[a.ID]; exists { return domain.ErrAlreadyExists }` under `mu.Lock()` before store. HTTP mapping to 409 `ALERT_ALREADY_EXISTS` is future Story 12 — one-line anchor in the sentinel doc comment. Story 3 Implementation Notes also amended with a 2026-04-13 pointer to this chain. Port-contract-correctness, not UUID-entropy.
+- **Refinements applied during review:**
+  1. Duplicate-ID check in `Create` (above) — the big one.
+  2. `sort.SliceStable` over `sort.Slice` — free determinism when two fast `Create` calls land on the same `CreatedAt` nanosecond (Windows 100ns timer resolution). Identical API, identical complexity, slightly higher constant. Correctness-neutral but stable beats unstable when the cost is zero.
+  3. Inline `// pre-allocated so zero-match returns [], not null (§9.1)` above the `out := make(...)` in `List`. The nil-vs-empty trap is non-obvious on a read; a future refactor could easily switch to `var out []*domain.Alert` and silently break JSON output.
+  4. Package doc anchor: "Atomicity of compound operations (read-check-write for decisions) is the service layer's concern; see DesignAndBreakdown §2.8b. This repo provides per-method atomicity only." Marks the boundary for future readers who might expect a `CompareAndSwap`-style API here.
+- **Lock discipline.** All four methods take `ctx context.Context` (interface contract; unused for MVP, future DB impl uses for cancellation). `Create`/`Update` take `mu.Lock()`; `FindByID`/`List` take `mu.RLock()`. Every method uses `defer mu.Unlock()` / `defer mu.RUnlock()` at the top — no multi-path unlocking. Pointer receivers (`*AlertRepo`) on all four to avoid the mutex-copy trap.
+- **Clone boundary.** Both read paths (`FindByID`, `List`) return `a.Clone()`. Both write paths (`Create`, `Update`) store `a.Clone()`. The port doc says clone-on-R/W is absolute regardless of caller trust — the cost is one alloc per op, and the `-race` cleanliness (to be proven in Story 7) depends on it.
+- **Cross-tenant collapse.** `FindByID` returns `ErrNotFound` for both missing-ID and cross-tenant cases (no existence leak). `Update` same. `ErrTenantMismatch` is **never** produced by this repo — it's reserved as an internal signal for future policy hooks, exactly as documented in the Story 3 sentinel doc.
+- **Compile-time guard.** `var _ domain.AlertRepository = (*AlertRepo)(nil)` at file scope — catches port-shape drift at build time without a test.
+- **Filter-before-sort in `List`.** Correctness + performance: sorting discarded entries wastes work, and sort-first would break future pagination semantics. O(n) scan + O(k log k) stable sort where k = matches.
+- **What the repo deliberately does NOT do:** no `Delete`, no `Exists`, no `CompareAndSwap`, no `ListStream`, no batch APIs, no tombstones, no in-memory indexes for filter fields. All YAGNI for MVP; §2.8b-style atomic-closure APIs would also force the port to grow, which we've held flat.
+- `go build ./...` + `go vet ./...` clean from `alert-service/`.
+- `project/docs/gotchas.md` gained two entries (§2.8a clone-on-R/W, §9.1 make-before-iteration) as Finalize step.
+- **Next-story handoff.** Story 7 (`alert_repo_test.go`) is the `-race` concurrency test suite that proves the lock + clone discipline holds. It must also cover: happy-path round-trip, cross-tenant `FindByID` → `ErrNotFound`, cross-tenant `Update` → `ErrNotFound`, duplicate-`Create` → `ErrAlreadyExists` (new), post-`FindByID` caller mutation does not affect subsequent reads (proves clone-on-read). The concurrency test must include an explicit comment pointing at §2.8b — we're testing heap safety, not business-rule atomicity under concurrent decides.
 
 ---
 
