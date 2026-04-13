@@ -58,10 +58,32 @@ Running log of Go-idiom traps and PRD-alignment invariants that would not be obv
 
 ---
 
-### §2.7a — stdout is the event bus; stderr is logs (PREVIEW — bites at Story 8)
+### §2.7a — stdout is the event bus; stderr is logs (Story 8 landed; Story 17 still pending)
 
 **Trap.** Letting `slog` default to stdout pollutes the simulated event stream. A reviewer running `./server | jq .` expects pure event JSON on stdout.
 
-**What we did (planned).** Publisher writes **only** to `os.Stdout`. `slog` is initialized with a handler writing to **`os.Stderr`** in `cmd/server/main.go`. Seeded here while the domain-events context is fresh; the wiring lands in Story 8 (stdout publisher) and Story 16 (logger setup in main).
+**What we did.** `internal/events/stdout_publisher.go` (Story 8) writes **only** to `os.Stdout` via an unexported `io.Writer` field with no public setter — a test-time writer seam would invite a second call site that bypasses this invariant, so the package exposes only `NewStdoutPublisher()` pinning `os.Stdout`. The package doc declares the "no logging in this package" rule as an enforced invariant, not a convention: any `log.Printf` or default `slog` call added here regresses the stream. `slog` setup against `os.Stderr` still lands in Story 17's `cmd/server/main.go` composition root.
 
-**If you're tempted to change this.** Any `log.Printf` or default `slog` call without explicit stderr handler will contaminate stdout. Test by piping stdout to a file post-escalation and confirming exactly one JSON line.
+**If you're tempted to change this.** Any `log.Printf` or default `slog` call inside `internal/events/`, or a new public `NewStdoutPublisherWithWriter(w io.Writer)` constructor, will eventually contaminate stdout or bypass §2.7a. For direct-package tests (none today), use an internal `_test.go`-scoped builder that does not expose a runtime seam. Test by piping stdout to a file post-escalation and confirming exactly one JSON line per event.
+
+---
+
+### Story 8 — Concurrent `Publish` can interleave JSON bytes on stdout
+
+**Trap.** `json.Encoder.Encode` is not documented as goroutine-safe; two concurrent `Publish` calls sharing `os.Stdout` can interleave bytes and produce torn JSON lines. POSIX `Write ≤ PIPE_BUF` is atomic **only for pipes**, not terminals or files; Windows `WriteFile` makes no atomicity guarantee at all. Story 17 wires this publisher behind concurrent HTTP handlers (one goroutine per request), so concurrent `Publish` is the default case, not an edge case. A torn line silently breaks downstream `tail -f | jq` consumers (they die on a single malformed line) and the failure is non-local — it doesn't show up in single-request tests.
+
+**What we did.** `StdoutPublisher` holds a `sync.Mutex`; `Publish` takes `mu.Lock()` / `defer mu.Unlock()` around `json.NewEncoder(p.w).Encode(event)`. The encoder is constructed **per call** rather than cached in the struct — with the mutex in place concurrent safety is covered either way, but per-call keeps the struct minimal (`{mu, w}`), keeps `w` the single source of truth, and sidesteps the undocumented goroutine-safety of `json.Encoder`. Pointer receiver on `Publish` (required by the mutex; `go vet`'s `copylocks` analyzer catches a value-receiver regression at build-lint). Debate snapshot: Oversight + Gemini recommended caching the encoder (saves one alloc); Senior Reviewer recommended per-call; team-lead sided with per-call — alloc cost is invisible at MVP event volume, struct stays simpler.
+
+**If you're tempted to change this.** Don't drop the mutex to "optimize" — the PRD-scale event size (~200 bytes) doesn't make the mutex observable, and the Windows atomicity gap is real. Don't cache the encoder without auditing goroutine-safety and updating the comments. Don't add a public writer-injection constructor — the §2.7a invariant depends on the unexported `w` + single constructor. If Story 17 ever wraps `os.Stdout` in `bufio.Writer`, the Flush MUST sit inside the same critical section as the Encode (prescribes the invariant, not the sequence — a wrapper owning Flush elsewhere still holds it).
+
+---
+
+## Testing
+
+### Story 7 — `go test -race` silently requires cgo on Windows
+
+**Trap.** `go test -race` on Windows silently requires cgo + a C toolchain (gcc/tdm-gcc/clang). On a dev box without one, `-race` fails with `C compiler "gcc" not found` and the race detector never runs. A test suite that leans on `-race` as its *primary* assertion against a `sync.RWMutex + Clone` design would silently produce false-green results when run locally — the file builds, the non-race test passes, but the happens-before checks never executed.
+
+**What we did.** The Story 7 concurrency test (`TestAlertRepo_ConcurrentCreateFindUpdate_RaceClean`) is deliberately partitioned so any race-induced error type is caught loudly *without* the race detector. A pool of 32 shared IDs is seeded SERIALLY before goroutines spin; the parallel workload is three disjoint shapes: `Create` on fresh UUIDs (collision cryptographically impossible → must return nil), `FindByID` on seeded IDs (must exist → must return nil), `Update` on seeded IDs (must exist → must return nil). Any non-nil error on any of these paths fails the test. A lock-corruption bug would flip a map entry into "missing" or "already-present" state and surface as `ErrNotFound` / `ErrAlreadyExists` on an op that cannot legally produce it. `-race` remains the CI-runner gate via Story 18's Makefile (CI runners are linux with cgo); locally on Windows, we accept the constraint.
+
+**If you're tempted to change this.** Don't drop the error-type partition just because `-race` is green in CI — the partition is the *primary* assertion; `-race` is belt-and-braces. A "simplify" refactor that reintroduces a tolerance bucket (`if err == ErrNotFound || err == ErrAlreadyExists { continue }`) would silently accept lock corruption. Similarly, don't route Creates and Reads through the same ID pool without seeding-vs-parallel discipline — the partition depends on "Create ops only use fresh UUIDs" and "Read/Update ops only use seeded IDs". If a future test wants to stress collision paths, it should be a *separate* test with its own expected-error shape.

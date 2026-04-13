@@ -2,7 +2,7 @@
 
 > Last reviewed: 2026-04-13
 
-This document captures the backend layer of the Alert Management service — a Go microservice rooted at `alert-service/`. The service follows Clean / hexagonal layering: a pure `domain` package holding the entity, enums, errors, events, and ports; a `service` package orchestrating use cases; a `storage/memory` adapter and an `events` stdout adapter satisfying the ports from outside; and an `api` package wrapping it all in HTTP. Only the **domain** layer is implemented today (Stories 2–5 complete — entity, errors, events, ports); the other layers are specified by the design doc and the per-story checklist but not yet coded.
+This document captures the backend layer of the Alert Management service — a Go microservice rooted at `alert-service/`. The service follows Clean / hexagonal layering: a pure `domain` package holding the entity, enums, errors, events, and ports; a `service` package orchestrating use cases; a `storage/memory` adapter and an `events` stdout adapter satisfying the ports from outside; and an `api` package wrapping it all in HTTP. The **domain** layer (Stories 2–5 — entity, errors, events, ports) and the **infrastructure adapters** for storage (Stories 6–7 — in-memory repo + 12-test concurrency-safe suite) and events (Story 8 — mutex-serialized stdout publisher) are implemented; service (9–10), API (11–16), and composition-root wiring (17) are specified by the design doc and per-story checklist but not yet coded.
 
 ## Project Structure
 
@@ -260,19 +260,48 @@ Three small middlewares, chained in `main`:
 
 No auth middleware — explicitly out of scope per the PRD.
 
-## Stdout / Stderr Split (Planned — Stories 7, 18)
+## Stdout Event Publisher
 
-The `EventPublisher` writes **only** to `os.Stdout`. `slog` is configured with a handler writing to **`os.Stderr`** in `cmd/server/main.go`. This keeps the simulated broker stream clean — a downstream consumer can `tail -f | jq` stdout without being polluted by server boot logs, request logs, or panic traces. This trap is seeded in `project/docs/gotchas.md` as a preview so the wiring agent catches it. See DesignAndBreakdown §2.7a.
+`internal/events/stdout_publisher.go` (Story 8) is the sole current implementation of `domain.EventPublisher`.
 
-## Testing (Planned — Stories 8–15)
+```go
+type StdoutPublisher struct {
+    mu sync.Mutex
+    w  io.Writer
+}
+
+func NewStdoutPublisher() *StdoutPublisher              // pins os.Stdout
+func (p *StdoutPublisher) Publish(ctx context.Context, event domain.Event) error
+```
+
+**Single-line invariant.** `Publish` serializes one call via `p.mu`, then calls `json.NewEncoder(p.w).Encode(event)` — which appends the trailing newline itself. Exactly one JSON line per published event, no leading/trailing noise.
+
+**Mutex rationale (§2.7a).** `json.Encoder.Encode` is not documented as goroutine-safe, and concurrent writes on the shared `io.Writer` can interleave bytes. POSIX `Write ≤ PIPE_BUF` atomicity applies only to pipes (not terminals/files); Windows `WriteFile` makes no atomicity guarantee at all. Story 17 wires this publisher behind concurrent HTTP handlers (one goroutine per request), so concurrent `Publish` is the default case — a torn JSON line silently breaks `tail -f | jq` consumers. The mutex closes this gap at negligible cost (~200-byte events; lock hold-time dominated by the encode itself).
+
+**Encoder-per-call, not cached.** The struct stays minimal (`{mu, w}`) and `w` remains the single source of truth. Caching a `*json.Encoder` in the struct would save one allocation per event but adds struct state and — outside the mutex — would be a goroutine-safety hazard. Alloc cost is invisible at MVP event volume; per-call wins on simplicity.
+
+**Writer seam is internal.** The `w io.Writer` field is unexported and has no public setter — stdout is the event bus by design (§2.7a). A public writer-injection constructor would invite a second call site that bypasses the invariant. Escape hatch for future direct-package tests: an internal `_test.go`-scoped builder that does not expose a runtime seam.
+
+**ctx accepted but not honored.** `Publish` is called post-repository-commit per §2.7 (persist-before-publish); cancelling the write post-commit would silently diverge storage state from the event stream. Accept the parameter to satisfy the port, ignore its cancellation.
+
+**No logging inside `internal/events/`.** Stdout is the event bus; `slog` lands in `cmd/server/main.go` (Story 17) against **`os.Stderr`**. The package doc on `stdout_publisher.go` declares this as an enforced invariant, not a convention. A downstream consumer can `./server 2>logs.txt | jq` to consume pure events.
+
+**Unbuffered by design.** If Story 17 later wraps `os.Stdout` in `bufio.Writer` for throughput, Flush MUST sit inside the same critical section as the Encode — the invariant prescribes "no other writer touches `w` between a partial-buffered Encode and its Flush", not a specific call sequence. A future wrapper owning Flush elsewhere still holds the invariant so long as it grabs the same mutex.
+
+**Compile-time port guard.** `var _ domain.EventPublisher = (*StdoutPublisher)(nil)` at file scope — mirrors the repo's guard pattern. Port drift fails the build, no test needed.
+
+See DesignAndBreakdown §2.7 / §2.7a and the Story 8 entries in `project/docs/gotchas.md`.
+
+## Testing
 
 The design doc §5 defines the minimum test suite, mapping to the PRD rubric:
 
-- **Service layer** — `CreateAlert` happy path; decide on OPEN / ESCALATED; decide on already-decided (`ErrAlreadyDecided`); decide with wrong tenant (`ErrNotFound`); escalate on OPEN; escalate on non-OPEN (`ErrInvalidTransition`).
-- **Storage layer** — concurrent Create/FindByID/Update under `-race`. Does **not** assert strict business-rule atomicity under concurrent decides (known MVP limitation, documented in README; real-world fix is DB-level `SELECT ... FOR UPDATE`).
-- **API layer** — `GET /alerts` without tenant → 400; `PATCH` on already-decided → 409.
+- **Storage layer (Story 7, landed)** — `internal/storage/memory/alert_repo_test.go` is a 12-test black-box suite (`package memory_test`, 100% statement coverage) covering round-trip CRUD, cross-tenant `ErrNotFound` collapse (both `FindByID` and `Update`), `ErrAlreadyExists` on duplicate `Create`, clone-on-read proof, clone-on-write proof, clone-on-`List` proof, empty-slice JSON-marshal (`string(json.Marshal(got)) == "[]"`), `CreatedAt` descending sort with explicit time offsets (Windows 100ns timer dodge), tenant+status+score filter composition with per-branch exclusion rows, and a partitioned concurrency test. The concurrency test pre-seeds a pool of 32 shared IDs serially before goroutines spin; the parallel workload is three disjoint shapes (`Create` on fresh UUIDs / `FindByID` + `Update` on seeded IDs) so any non-nil error is a real bug rather than an accepted race — the error-type partition is what makes the test meaningful without `-race`, which remains the CI-runner gate (Story 18's Makefile; cgo-on-Windows constraint captured in `project/docs/gotchas.md` `## Testing`). A 12th `t.Skip` test materializes the ctx-cancellation contract for a future DB impl.
+- **Events layer (Story 8)** — no tests by AC; integration covered transitively by Story 10's service tests against a fake publisher.
+- **Service layer (Story 10)** — `CreateAlert` happy path; decide on OPEN / ESCALATED; decide on already-decided (`ErrAlreadyDecided`); decide with wrong tenant (`ErrNotFound`); escalate on OPEN; escalate on non-OPEN (`ErrInvalidTransition`).
+- **API layer (Story 16)** — `GET /alerts` without tenant → 400; `PATCH` on already-decided → 409.
 
-Run with `go test ./... -race -cover`.
+Run with `go test ./... -race -cover` (CI) or `go test ./... -cover` (Windows dev where cgo isn't installed; the partitioned concurrency test still fails loudly on race-induced bugs without `-race`).
 
 ## Out of Scope
 

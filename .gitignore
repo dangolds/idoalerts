@@ -35,3 +35,4 @@ go.work.sum
 .claude/
 claude-yolo.sh
 project/docs/instructions/
+project/bestPractice.txt

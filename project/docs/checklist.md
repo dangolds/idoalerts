@@ -211,7 +211,7 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ---
 
-### [ ] Story 7: Storage concurrency + CRUD tests
+### [x] Story 7: Storage concurrency + CRUD tests
 
 **As a** reviewer,
 **I want** `-race`-clean tests proving the `RWMutex + Clone` pattern holds under load,
@@ -219,18 +219,52 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/storage/memory/alert_repo_test.go` exists.
-- [ ] Test: sequential `Create → FindByID → Update → FindByID` round-trip (happy-path sanity check).
-- [ ] Test: cross-tenant `FindByID` returns `ErrNotFound` (not the alert, not `ErrTenantMismatch`).
-- [ ] Test: cross-tenant `Update` returns `ErrNotFound`.
-- [ ] Test: concurrent goroutines spamming `Create` / `FindByID` / `Update` across distinct and shared IDs — no panics, no data races. `sync.WaitGroup`, ~50 goroutines × 100 iterations each is plenty.
-- [ ] Test: after a `FindByID` caller mutates the returned pointer, a subsequent `FindByID` still returns the original values (proves the clone-on-read).
-- [ ] `go test ./internal/storage/memory/... -race` passes.
-- [ ] Explicit comment in the concurrency test pointing at §2.8b — we are testing heap-safety, **not** business-rule atomicity under concurrent decides.
+- [x] `internal/storage/memory/alert_repo_test.go` exists.
+- [x] Test: sequential `Create → FindByID → Update → FindByID` round-trip (happy-path sanity check).
+- [x] Test: cross-tenant `FindByID` returns `ErrNotFound` (not the alert, not `ErrTenantMismatch`).
+- [x] Test: cross-tenant `Update` returns `ErrNotFound`.
+- [x] Test: concurrent goroutines spamming `Create` / `FindByID` / `Update` across distinct and shared IDs — no panics, no data races. `sync.WaitGroup`, ~50 goroutines × 100 iterations each is plenty.
+- [x] Test: after a `FindByID` caller mutates the returned pointer, a subsequent `FindByID` still returns the original values (proves the clone-on-read).
+- [x] `go test ./internal/storage/memory/... -race` passes. *(CI-gated — see Impl Notes for Windows + cgo constraint; all 12 tests PASS under `go test -cover` with 100% coverage.)*
+- [x] Explicit comment in the concurrency test pointing at §2.8b — we are testing heap-safety, **not** business-rule atomicity under concurrent decides.
+
+**Implementation Notes (2026-04-13):**
+
+- **Files touched:** `alert-service/internal/storage/memory/alert_repo_test.go` (created, ~520 lines net one file). Black-box `package memory_test` — the suite consumes only the exported port surface, mirroring how `service` will use the repo.
+- **Final test count:** 12 tests in one file: 11 active + 1 `t.Skip` (the N4 ctx-contract placeholder for a future DB impl). 100% statement coverage on `internal/storage/memory`. Run time ≈ 0.56s without `-race`.
+- **Deviations from AC (all additive, all ratified in the team's debate round):**
+  1. **#6 `TestAlertRepo_Update_CallerMutationAfterUpdateDoesNotAffectStore`** — clone-on-write symmetry. AC names only clone-on-read, but §2.8a is a *bilateral* invariant: a refactor that stored the caller's pointer directly in `Update` wouldn't be caught by the read-side test alone. One ~15-line test closes the gap.
+  2. **#7 `TestAlertRepo_List_EmptyReturnsNonNilSlice` asserts `string(json.Marshal(got)) == "[]"`** — per `project/docs/gotchas.md` §9.1, which explicitly assigns this check to Story 7. A `len == 0` assertion alone wouldn't catch a `nil` return (both have len 0; only the JSON check distinguishes them).
+  3. **#8 `TestAlertRepo_List_SortedByCreatedAtDesc`** — AC silent; §9.12 determinism. Uses three alerts with explicit `time.Now().Add(-N*sec)` offsets to dodge Windows 100ns timer granularity (per Story 6 notes).
+  4. **#9 `TestAlertRepo_List_FiltersByStatusAndMinScore`** — AC silent; seeds one positive row plus one "must-be-excluded" row per predicate branch (wrong-tenant / wrong-status / below-score) so a filter bug that short-circuits any single predicate flunks exactly one row.
+  5. **#11 `TestAlertRepo_List_CallerMutationDoesNotAffectStore`** — senior-reviewer **blocking** add. `List` has its own `append(out, a.Clone())` call site distinct from `FindByID`'s return; the existing #5 read-clone test doesn't exercise it. Without #11, a refactor that dropped the `.Clone()` inside the `List` loop would be silently missed.
+  6. **#12 `TestAlertRepo_ContextCancellation_ContractForDBImpl`** — oversight add. `t.Skip("§2.2 — in-memory impl ignores ctx for MVP; contract-level test lands with DB impl")`. Zero cost today, materializes the port contract in code so a future DB adapter inherits a test slot to fill.
+- **A1 design rationale (critical context for future readers / respawning agents):** The concurrency test is **partitioned per operation**, not a uniform "random mixed workload with tolerance bucket". A pool of 32 shared IDs is seeded SERIALLY before goroutines spin. Then three disjoint op shapes run in parallel:
+  - **Creates** use a *fresh* `uuid.NewString()` every call → collision is cryptographically impossible → must return nil.
+  - **FindByID** targets only seeded-pool IDs → must exist → must return nil.
+  - **Update** targets only seeded-pool IDs → must exist → must return nil.
+  
+  Any non-nil error on any of these paths fails the test. **The error-type partition is what makes this test meaningful in environments where `-race` cannot run** (see below); `-race` is additive belt-and-braces, not load-bearing. A future "simplify" pass that reintroduces a tolerance bucket like `if errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrAlreadyExists) { continue }` would silently accept lock corruption that flipped a seeded-ID entry into "missing" or a fresh-UUID into "already-present".
+- **`-race` local constraint:** Windows dev box has no gcc / tdm-gcc / clang / mingw64 installed; `go test -race` silently requires cgo + a C toolchain. Team decision: **do NOT install a C toolchain on this machine — MVP is not worth the setup cost**. `-race` moves to the CI gate via Story 18's Makefile (CI runners are linux with cgo). The partitioned-workload design above absorbs this cost locally. Full reasoning lives in `project/docs/gotchas.md` under the new `## Testing` section.
+- **§2.8b pointer comment** — landed verbatim at `TestAlertRepo_ConcurrentCreateFindUpdate_RaceClean`'s doc comment. States that this test proves HEAP SAFETY of the `RWMutex + Clone` pattern; does NOT assert business-rule atomicity (no double-decide, no torn writes at the domain level); that gap is the service layer's concern (§2.8b — accepted MVP limitation, production fix is DB-level `SELECT ... FOR UPDATE`).
+- **N5 (no duplicate `var _ domain.AlertRepository = (*memory.AlertRepo)(nil)` guard):** the prod `alert_repo.go` already has the compile-time port guard from Story 6 — redundant in the test file.
+- **N6 clone-on-write rationale:** explicitly noted in a package-level comment at the top of `TestAlertRepo_Update_CallerMutationAfterUpdateDoesNotAffectStore` — documents WHY the test is beyond AC (bilateral §2.8a invariant) so the next reader doesn't try to delete it as redundant with #5.
+- **N7 (no exported testutil):** all helpers (`newAlert`, `with*` option funcs, `ptrFloat`) are unexported, `_test.go`-scoped. Oversight's architectural guardrail: Story 10 (`AlertService` tests) must not pick up a test-only import dependency on a `testutil` package. Helpers stay test-file-local; each layer builds its own if needed.
+- **Package choice** — `memory_test` (black-box), not `memory` (internal). Exercises only the port surface; trade-off is no peek at the unexported `alerts` map. Team agreed: the behavioral assertions (FindByID returns / Update + FindByID round-trips) cover the same ground without coupling tests to internals that could shift in a future refactor.
+- **Cleanup during finalize:** removed an unused `ptrStatus(s domain.Status) *domain.Status` helper that the earlier draft carried — `go vet` didn't flag it (unused helpers in `_test.go` files are legal) but zero call sites = dead code. Grep confirmed zero users before removal.
+- `go build ./...` + `go vet ./...` clean from `alert-service/`.
+- `go test ./internal/storage/memory/... -cover` — 11 PASS, 1 SKIP, 100% statement coverage. `-race` pending CI per above.
+- **Next-story handoff (Story 8 — stdout `EventPublisher`):** Infrastructure Phase 3 is now **2/3 complete** (Story 6 repo + Story 7 tests). Story 8 creates `alert-service/internal/events/stdout_publisher.go` — a trivial `StdoutPublisher` satisfying `domain.EventPublisher`. Key invariants, seeded by Story 4's gotchas entries and the team's prior debate:
+  - **`os.Stdout` is the event bus** (§2.7a). Use `json.NewEncoder(os.Stdout).Encode(event)` — it appends a newline automatically, so each event is one JSON line on stdout.
+  - **NO logging in this package.** `slog` is reserved for `os.Stderr`, configured in `cmd/server/main.go` (Story 16). Any `log.Printf` or default-handler `slog.Info` call in the `events` package contaminates the simulated broker stream.
+  - **On encode failure, return the error** — the service decides what to do. For stdout this is effectively never, but honor the interface contract.
+  - **No tests for the publisher itself** (trivial I/O glue; covered transitively by Story 10's service tests using a fake publisher).
+  - Events consumed by the publisher are the two typed structs from Story 4 (`AlertDecidedEvent`, `AlertEscalatedEvent`); their `EventName()` returns `e.Event` (field-read, single-source-of-truth pattern — see AM-4 in feature design decisions).
+  - Story 9's service layer will construct events via struct literal and set `Timestamp: time.Now().UTC().Format(time.RFC3339)` at publish time (§9.4 / §9.13 — publish time, NOT `Alert.UpdatedAt`).
 
 ---
 
-### [ ] Story 8: Stdout `EventPublisher`
+### [x] Story 8: Stdout `EventPublisher`
 
 **As a** service-layer implementer,
 **I want** a publisher that writes JSON-encoded events to **stdout** (not stderr),
@@ -238,11 +272,30 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/events/stdout_publisher.go` defines `StdoutPublisher` struct and `NewStdoutPublisher()` constructor.
-- [ ] `Publish(ctx, event)` JSON-encodes `event` and writes one line to `os.Stdout` followed by `\n`. Use `json.NewEncoder(os.Stdout).Encode(event)` (adds newline automatically).
-- [ ] On encode failure, return the error — the service decides what to do (for stdout this is effectively never, but honor the interface).
-- [ ] **Do not write logs to stdout anywhere in this package.** Stdout is the event bus. Logs go to stderr via `slog` (§2.7a).
-- [ ] No tests required for the publisher itself (trivial I/O glue); it is covered transitively by service tests using a fake publisher.
+- [x] `internal/events/stdout_publisher.go` defines `StdoutPublisher` struct and `NewStdoutPublisher()` constructor.
+- [x] `Publish(ctx, event)` JSON-encodes `event` and writes one line to `os.Stdout` followed by `\n`. Use `json.NewEncoder(os.Stdout).Encode(event)` (adds newline automatically).
+- [x] On encode failure, return the error — the service decides what to do (for stdout this is effectively never, but honor the interface).
+- [x] **Do not write logs to stdout anywhere in this package.** Stdout is the event bus. Logs go to stderr via `slog` (§2.7a).
+- [x] No tests required for the publisher itself (trivial I/O glue); it is covered transitively by service tests using a fake publisher.
+
+**Implementation Notes (2026-04-13):**
+
+- **Files touched:** `alert-service/internal/events/stdout_publisher.go` (created, 74 lines incl. package + field + method doc). Stdlib only. No tests per AC.
+- **Struct shape:** `type StdoutPublisher struct { mu sync.Mutex; w io.Writer }`. Constructor `NewStdoutPublisher()` pins `os.Stdout`. `Publish(ctx, event)` holds `p.mu.Lock()` for the duration of `json.NewEncoder(p.w).Encode(event)` and returns the encode error verbatim.
+- **Design calls landed (read in this order on respawn):**
+  1. **`sync.Mutex` guarding `Encode` — non-negotiable per §2.7a clean-stream invariant.** `json.Encoder.Encode` is not documented goroutine-safe; concurrent writes on the shared `io.Writer` can interleave bytes. POSIX `Write ≤ PIPE_BUF` atomicity applies **only to pipes**, not terminals/files; Windows `WriteFile` makes no atomicity guarantee. Story 17 wires this publisher behind concurrent HTTP handlers (one goroutine per request) — concurrent `Publish` is the default, not the edge case. A torn JSON line silently breaks `tail -f | jq` consumers, which is the exact failure §2.7a exists to prevent. Inline mutex-field comment captures the three OS/library reasons in-code so a future respawn cannot handwave "why the mutex."
+  2. **Per-call `json.NewEncoder(p.w).Encode(event)` — deliberately NOT cached.** Debate snapshot for respawn: Oversight + Gemini recommended caching the encoder in the struct (saves one allocation); Senior Reviewer recommended per-call (keeps struct state minimal, sidesteps `json.Encoder` goroutine-safety ambiguity, keeps `w` the single source of truth). Team-lead sided with per-call. Alloc cost is invisible at MVP event volume; the struct stays `{mu, w}` and can't drift a stale encoder if `w` is ever swapped. Method-doc comment captures this so the decision survives respawn.
+  3. **`io.Writer` seam — unexported field, SINGLE public constructor `NewStdoutPublisher()` pinning `os.Stdout`.** No writer-injection public constructor today. Rationale captured in constructor doc: a public seam would invite a second call site that bypasses the §2.7a invariant. Escape hatch for future direct-package tests: an internal `_test.go`-scoped builder (does not expose a runtime seam).
+  4. **ctx accepted but not honored.** Once `Publish` runs, persist-before-publish (§2.7) has already committed; cancelling the write post-commit would silently diverge storage state from the event stream. Same pattern as Story 6 repo. Method-doc captures it.
+  5. **No error wrapping.** `return json.NewEncoder(p.w).Encode(event)` bare. Service (Story 9) logs raw at ERROR per §2.7; wrapping here adds noise.
+  6. **Compile-time port guard** `var _ domain.EventPublisher = (*StdoutPublisher)(nil)` at file scope — mirrors Story 6's `alert_repo.go` pattern. Port drift fails the build.
+  7. **Intentionally unbuffered.** Package doc captures the bufio-wrap hazard as an invariant: "Flush MUST sit inside the same critical section as the Encode so a concurrent Publish cannot interleave with the tail of a pending buffered event — this prescribes the invariant, not a specific call sequence." Phrasing broadened from architect's initial "immediately after Encode" on senior-reviewer's catch — a future wrapper that owns Flush elsewhere still holds the invariant.
+- **Deviations from AC:** none. One addition: the compile-time port guard (Story 6 precedent; AC doesn't name it, but it's three-line insurance against port drift).
+- **Cross-layer wiring for future stories (critical for respawn):**
+  - **Story 9 (consumer):** `AlertService` constructor takes `domain.EventPublisher` (port), NOT `*events.StdoutPublisher`. Service never imports `internal/events`. Service constructs events via struct literal — `domain.AlertDecidedEvent{Event: "alert.decided", ..., Timestamp: time.Now().UTC().Format(time.RFC3339)}` — and hands them to `pub.Publish(ctx, evt)`. Per §9.13 the timestamp is publish-time, NOT `Alert.UpdatedAt`.
+  - **Story 10 (service tests):** uses a **fake publisher** (in-memory event-recording struct satisfying `domain.EventPublisher`), NOT this StdoutPublisher. Zero coupling risk — the port is the contract, not the impl.
+  - **Story 17 (main.go composition root):** `events.NewStdoutPublisher()` is called once, the `*StdoutPublisher` is passed to `service.NewAlertService(repo, pub, logger)`. Graceful shutdown does NOT need to flush this publisher (unbuffered); a future bufio wrap adds a Close/Flush step. Importantly, `cmd/server/main.go` must wire `slog.SetDefault` (or construct a new default handler) to write to **os.Stderr** — any `slog.Info("server started...")` on the default handler leaking to stdout would contaminate the event stream; see §2.7a and the gotchas entry.
+- **Next-story handoff (Story 9):** Infrastructure Phase 3 is **3/3 complete** (Stories 6, 7, 8). Story 9 lands `alert-service/internal/service/alert_service.go` with four methods (`CreateAlert`, `ListAlerts`, `DecideAlert`, `EscalateAlert`). Service owns UUID generation + timestamp setting (§2.8); orchestrates load-check-mutate-persist-publish (§2.7); builds events at publish time with RFC3339 strings (§9.13); inline §2.8b race comment at the decide check; inline §2.9c strict-write-once comment at the decide flow. Service constructor signature: `NewAlertService(repo domain.AlertRepository, pub domain.EventPublisher, logger *slog.Logger) *AlertService`. The `*slog.Logger` is used ONLY for publish-failure logging (log at ERROR and return success anyway — state is authoritative per §2.7). Event marker `domain.Event` satisfied by `AlertDecidedEvent` / `AlertEscalatedEvent`; `EventName()` returns `e.Event` (field-read — see Story 4 notes, AM-4 in feature design decisions).
 
 ---
 
