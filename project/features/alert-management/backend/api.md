@@ -2,24 +2,25 @@
 
 > Last reviewed: 2026-04-13
 
-This document captures the backend layer of the Alert Management service — a Go microservice rooted at `alert-service/`. The service follows Clean / hexagonal layering: a pure `domain` package holding the entity, enums, errors, events, and ports; a `service` package orchestrating use cases; a `storage/memory` adapter and an `events` stdout adapter satisfying the ports from outside; and an `api` package wrapping it all in HTTP. Only the **domain** layer is implemented today (Stories 2–4 complete); the other layers are specified by the design doc and the per-story checklist but not yet coded.
+This document captures the backend layer of the Alert Management service — a Go microservice rooted at `alert-service/`. The service follows Clean / hexagonal layering: a pure `domain` package holding the entity, enums, errors, events, and ports; a `service` package orchestrating use cases; a `storage/memory` adapter and an `events` stdout adapter satisfying the ports from outside; and an `api` package wrapping it all in HTTP. Only the **domain** layer is implemented today (Stories 2–5 complete — entity, errors, events, ports); the other layers are specified by the design doc and the per-story checklist but not yet coded.
 
 ## Project Structure
 
 ```text
 alert-service/
 ├── cmd/
-│   └── server/          # main.go (Story 18)
+│   └── server/          # main.go (Story 17)
 ├── internal/
 │   ├── domain/          # Entity, Status, errors, events, ports — layer complete
 │   │   ├── alert.go
 │   │   ├── errors.go
-│   │   └── events.go
-│   ├── service/         # Use cases (Stories 8–11)
+│   │   ├── events.go
+│   │   └── ports.go
+│   ├── service/         # Use cases (Stories 9–10)
 │   ├── storage/
 │   │   └── memory/      # In-memory AlertRepository (Story 6)
-│   ├── events/          # Stdout EventPublisher (Story 7)
-│   └── api/             # DTOs, router, handlers, middleware, error mapper (Stories 12–17)
+│   ├── events/          # Stdout EventPublisher (Story 8)
+│   └── api/             # DTOs, router, handlers, middleware, error mapper (Stories 11–16)
 ├── go.mod               # module github.com/dangolds/idoalerts/alert-service; go 1.22
 └── go.sum
 ```
@@ -151,10 +152,11 @@ Four invariants are pinned by inline code comments and by entries in `project/do
 
 The service will construct events via struct literal at the two call sites: `domain.AlertDecidedEvent{Event: "alert.decided", AlertID: a.ID, ..., Timestamp: time.Now().UTC().Format(time.RFC3339)}`.
 
-## Ports (Planned — Story 5)
+## Ports
+
+`internal/domain/ports.go` (Story 5):
 
 ```go
-// internal/domain/ports.go
 type AlertRepository interface {
     Create(ctx context.Context, a *Alert) error
     FindByID(ctx context.Context, tenantID, id string) (*Alert, error)
@@ -168,12 +170,14 @@ type EventPublisher interface {
 
 type ListFilter struct {
     TenantID string   // required
-    Status   *Status  // optional
-    MinScore *float64 // optional
+    Status   *Status  // optional — nil means no status filter
+    MinScore *float64 // optional — nil means no score filter
 }
 ```
 
-Repository returns `ErrNotFound` when the ID exists under a different tenant — tenant filtering happens at the repository boundary (defense in depth). The service layer also trusts that guarantee but does not re-check.
+The port doc pins only the **correctness invariants every impl must honor**: cross-tenant `FindByID`/`Update` collapse to `ErrNotFound` at the repo boundary (defense in depth, §2.3 / §2.8a, never surface `ErrTenantMismatch` to callers). Impl-flavored concerns — non-nil empty slice on `List` (§9.1), `CreatedAt` descending sort (§9.12), clone-on-read/write (§2.8a) — are documented on the in-memory impl itself, not on the interface. A future DB impl might deliver pre-sorted via an index or stream results through a channel; pinning those on the port would over-specify.
+
+`ListFilter` is naked data — no constructor, no validator method. Handler parses query → builds the struct → service passes through → repo scans (O(n) for MVP). `*Status` / `*float64` make "unset" unambiguous (a typed-zero-value filter would be incorrect: `Status("")` is "no filter", not "alerts with no status"). The service layer trusts the port contract and does not re-check tenant scoping.
 
 ## HTTP API (Planned — Stories 12–17)
 

@@ -134,7 +134,7 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ---
 
-### [ ] Story 5: Port interfaces (`AlertRepository`, `EventPublisher`, `ListFilter`)
+### [x] Story 5: Port interfaces (`AlertRepository`, `EventPublisher`, `ListFilter`)
 
 **As a** service-layer implementer,
 **I want** the interfaces my service depends on defined in `domain`,
@@ -142,11 +142,23 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 **Acceptance Criteria:**
 
-- [ ] `internal/domain/ports.go` defines `AlertRepository` with `Create`, `FindByID`, `List`, `Update` — all taking `ctx context.Context` as first arg (§2.2, non-negotiable).
-- [ ] `FindByID(ctx, tenantID, id)` signature — tenant is a required scoping parameter, not stuffed into an options struct.
-- [ ] `EventPublisher` interface: `Publish(ctx context.Context, event Event) error`.
-- [ ] `ListFilter` struct: `TenantID string` (required), `Status *Status` (optional), `MinScore *float64` (optional). Pointers for the optionals make "unset" unambiguous.
-- [ ] Interfaces live in `domain` so service depends on domain, not the other way around (Go interface-satisfaction is structural — no `implements` keyword needed on impls).
+- [x] `internal/domain/ports.go` defines `AlertRepository` with `Create`, `FindByID`, `List`, `Update` — all taking `ctx context.Context` as first arg (§2.2, non-negotiable).
+- [x] `FindByID(ctx, tenantID, id)` signature — tenant is a required scoping parameter, not stuffed into an options struct.
+- [x] `EventPublisher` interface: `Publish(ctx context.Context, event Event) error`.
+- [x] `ListFilter` struct: `TenantID string` (required), `Status *Status` (optional), `MinScore *float64` (optional). Pointers for the optionals make "unset" unambiguous.
+- [x] Interfaces live in `domain` so service depends on domain, not the other way around (Go interface-satisfaction is structural — no `implements` keyword needed on impls).
+
+**Implementation Notes (2026-04-13):**
+
+- File: `alert-service/internal/domain/ports.go` (created). Single stdlib import: `context`. `package domain`.
+- Order within file: package doc comment → `AlertRepository` → `ListFilter` → `EventPublisher`. `ListFilter` sits adjacent to the `List` method that references it (readability); `EventPublisher` last since it's a separate concern. Cosmetic; reviewers signed off.
+- **Doc-split refinement (senior-reviewer, adopted):** The `AlertRepository` doc-block pins **only the correctness invariants every impl must honor** — cross-tenant `FindByID`/`Update` collapse to `ErrNotFound` (§2.3, §2.8a). Impl-specific rules (non-nil empty slice §9.1, `CreatedAt` desc sort §9.12) were **moved out of the port doc** and will be re-documented on the Story 6 in-memory impl itself. Rationale: a future DB impl might pre-sort via index or deliver results via channel — pinning those shapes on the port would over-specify. Tenant-collapse is a security invariant and stays. Plan originally had all three under the port doc; this split is the only deviation.
+- **Polish (oversight, adopted):** Package-level doc comment cites DesignAndBreakdown §4 so future readers find the rationale without code-diving.
+- `ListFilter` is naked data — no constructor, no validator method. Handler parses query → builds struct → service pass-through → repo scans. Keeps the domain naked-data pattern consistent with Stories 2–4 (no factories, no transition methods).
+- Rejected alternatives (flagged for transparency): adding `Delete`/`Exists` to `AlertRepository` (YAGNI, PRD doesn't need them); stuffing tenant into an options struct on `FindByID` (checklist forbids, §2.3 wants tenant as a required scoping param); using `map[string]any` for list filters (loses compile-time safety). All confirmed unneeded.
+- No `go mod tidy` — no new deps beyond stdlib.
+- `go build ./...` + `go vet ./...` clean from `alert-service/`.
+- **Next-story handoff:** Domain layer truly complete. Story 6 (`internal/storage/memory/alert_repo.go`) implements all four `AlertRepository` methods; the impl-flavored rules (non-nil empty slice, `CreatedAt` desc sort, clone-on-R/W per §2.8a) now belong on the impl's package doc. `EventPublisher` consumed by Story 8 (stdout publisher). `AlertService` constructor in Story 9 takes both interfaces by value — no import cycles because interfaces live in `domain`.
 
 ---
 

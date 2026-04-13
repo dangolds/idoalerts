@@ -30,12 +30,13 @@ Only a single backend layer; no frontend, no IoT, no external persistence.
 
 ## Current State
 
-**Domain layer complete** — `internal/domain/` has:
+**Domain layer complete** (Stories 2–5) — `internal/domain/` has:
 - `alert.go` — `Alert` struct, `Status` typed enum with four constants, `CanDecide` / `CanEscalate` predicates, `Clone` deep-copy for repo boundary. (Commit `edccd10`.)
 - `errors.go` — four `errors.New` sentinels (`ErrNotFound`, `ErrAlreadyDecided`, `ErrInvalidTransition`, `ErrTenantMismatch`). (Commit `68a8d04`.)
 - `events.go` — `Event` marker interface with `EventName() string`, plus `AlertDecidedEvent` and `AlertEscalatedEvent` structs with PRD-aligned JSON tags. (Commits `1bacc2b`, revised by `4d57190`.)
+- `ports.go` — `AlertRepository` interface (Create/FindByID/List/Update, ctx-first), `EventPublisher` interface (Publish(ctx, Event)), `ListFilter` struct (TenantID required, Status / MinScore pointer-optional). The port doc pins only correctness invariants every impl must honor (cross-tenant collapse to `ErrNotFound`); impl-flavored rules (slice-init, sort) move to the impl's package doc so future DB/channel impls aren't over-specified.
 
-**Not yet implemented** — ports (Story 5), in-memory repo (Story 6), stdout publisher (Story 7), service layer (Stories 8–11), API / DTOs / middleware / router (Stories 12–17), `main.go` wiring (Story 18), README + Makefile (Story 19), final rubric sweep (Story 20).
+**Not yet implemented** — in-memory repo (Story 6), repo tests (Story 7), stdout publisher (Story 8), service layer (Stories 9–10), API / DTOs / middleware / router (Stories 11–16), `main.go` wiring (Story 17), Makefile + README (Stories 18–19), final rubric sweep (Story 20).
 
 See `project/docs/checklist.md` for the full per-story breakdown and per-story Implementation Notes.
 
