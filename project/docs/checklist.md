@@ -353,27 +353,6 @@ Decomposition principle: a story gets **execution tasks** only when it touches m
 
 ---
 
-### [ ] Story 9.5: Trim comments + right-size docs
-
-Stories 6–9 accreted heavy in-source commenting and feature-doc prose that mirrors the code rather than adding hints on top of it. One pass to delete anything a reader could infer from the code itself. Half-integer numbering keeps Stories 10–20 unrenumbered.
-
-**Rule.** Comments are hints for non-obvious WHY, not narration of WHAT. Feature docs are entry points, not mirrors. Default is delete. Keep a line only if a reviewer would need `git blame` to answer "why not the obvious thing?".
-
-**In scope (trim pass, not rewrite):**
-
-- [ ] `alert-service/internal/service/alert_service.go` — keep the two AC-mandated decide comments (§2.8b race at CanDecide check, §2.9c at decide flow) and the `AlertID`/`Decision` field-name landmines. Drop the package doc, multi-line method doc blocks, "no compile-time guard" explainer, and inline rationale on obvious returns.
-- [ ] `alert-service/internal/storage/memory/alert_repo.go` + `internal/events/stdout_publisher.go` — same trim. Keep clone-at-boundary and mutex-for-interleaving (genuinely non-obvious); drop the rest.
-- [ ] `alert-service/internal/domain/*.go` — keep PRD-enforcement comments (e.g. `// do NOT rename to status` on the event field). Drop comments that restate the code.
-- [ ] `project/features/alert-management/backend/api.md` — collapse to entry-point paragraphs per layer, pointing into the code. Drop embedded struct dumps and re-stated invariants.
-- [ ] `project/features/alert-management/design-decisions.md` — keep ADRs recording a real choice-among-alternatives (AM-1, AM-2, AM-5, AM-6). Inline or drop the rest.
-- [ ] `project/features/alert-management/overview.md` — Current State → one paragraph; drop the per-story blow-by-blow.
-- [ ] `project/features/INDEX.md` — shorten the Alert Management status cell to a terse phrase.
-- [ ] `project/docs/gotchas.md` + `project/features/alert-management/gotchas.md` — already lean; trim any entry that describes the fix instead of the trap.
-- [ ] Landed Implementation Notes (Stories 1–9) stay untouched — history. Future Implementation Notes follow the new rule: bullets, not essays.
-
-**Verification.** `go build ./... && go vet ./...` stay clean. No behavioral change. Story 10 proceeds against the trimmed code.
-
----
 
 ### [ ] Story 10: Service-layer unit tests
 
