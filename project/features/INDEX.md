@@ -8,7 +8,7 @@ See also the project-wide docs at `project/docs/`: the refined design doc (`Desi
 
 | Feature | Status | Overview |
 |---|---|---|
-| [Alert Management](alert-management/overview.md) | In progress (domain + repo impl + repo tests + stdout publisher done; service, API, wiring pending) | Sanctions-screening alert lifecycle service: create, list with tenant/status/score filters, escalate (OPEN → ESCALATED), write-once decide (OPEN \| ESCALATED → CLEARED \| CONFIRMED_HIT). Multi-tenant, in-memory storage, stdout event bus. |
+| [Alert Management](alert-management/overview.md) | In progress (domain + repo impl + repo tests + stdout publisher + service layer done; service tests, API, wiring pending) | Sanctions-screening alert lifecycle service: create, list with tenant/status/score filters, escalate (OPEN → ESCALATED), write-once decide (OPEN \| ESCALATED → CLEARED \| CONFIRMED_HIT). Multi-tenant, in-memory storage, stdout event bus. |
 
 ## Glossary
 

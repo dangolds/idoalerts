@@ -70,3 +70,18 @@ Feature-scoped architectural decisions for the Alert Management service, capture
 - **Decision:** Keep `ErrTenantMismatch` as a distinct sentinel, but collapse it to `ErrNotFound` at the repository boundary. The sentinel never reaches the HTTP layer.
 - **Rationale:** The distinct sentinel costs one extra line but preserves the ability to log the two cases separately (e.g., an audit log of "attempted cross-tenant access") and enables future policy hooks without reshaping the repository API. The inline comment above `ErrTenantMismatch` documents that it is internal-only, naming both §2.3 and §2.8a.
 - **Consequences:** HTTP error mapping table has two rows mapping to 404 `ALERT_NOT_FOUND` (`ErrNotFound` and `ErrTenantMismatch`), even though the repository collapses to only one in practice. Cost is zero; benefit is defense-in-depth if a future refactor changes the collapse point.
+
+---
+
+## AM-6 — `CreateAlertInput` lives in the service package, no struct tags
+
+- **Status:** accepted
+- **Date:** 2026-04-13
+- **Context:** Story 9's `CreateAlert` signature is `CreateAlert(ctx, input) (*domain.Alert, error)`. The `input` type was unspecified by the AC; three homes were candidates. (a) Service-package struct `CreateAlertInput` with plain Go fields; (b) accept `*domain.Alert` directly and overwrite server-owned fields inside the service; (c) a DTO type in `internal/api/dto`. The type also carries a sub-decision: should it carry `json:` / `validate:` tags so handlers can decode directly into it?
+- **Decision:** Introduce `CreateAlertInput` in `internal/service/alert_service.go` with plain Go fields only — no `json:` tags, no `validate:` tags. Fields are `TenantID`, `TransactionID`, `MatchedEntityName`, `MatchScore`, `AssignedTo`. The handler DTO (`CreateAlertRequest`, Story 11+) is a separate type carrying the wire tags and validator rules; it maps onto `CreateAlertInput` at the handler boundary.
+- **Rationale:**
+  - (b) is strictly worse than (a): taking `*domain.Alert` invites the "pass a stored alert back into Create" bug that `ErrAlreadyExists` was added to catch (Story 6), and it lets a caller smuggle a pre-populated `ID` / `Status` / timestamps past the §2.8 invariant that server-owned fields live in the service.
+  - (c) couples service to the api-dto package, reversing the hexagonal direction — service depends on domain only today, and that discipline is worth preserving. A future second handler layer (grpc, cli) would need its own DTO anyway; centralizing them in `internal/api/dto` pre-judges that split.
+  - (a) makes §2.8 ownership type-enforced: the absent fields (`ID`, `Status`, `CreatedAt`, `UpdatedAt`, `DecisionNote`) cannot be smuggled because they are not in the struct. The service constructs them (`uuid.NewString()`, `StatusOpen`, single-value `now`, `""`) explicitly.
+  - On struct tags: attaching `json:` / `validate:` here would collapse the two-DTO boundary and pull wire-validation concerns into the service layer, violating the "wire validation at the handler, business rules at the service" split from the design doc. An accidental `json:"tenantId"` here would also make the service decode-compatible with the handler body, inviting a future "skip the DTO step" shortcut.
+- **Consequences:** Story 11 needs a mapping step `CreateAlertRequest → CreateAlertInput` — two or three lines, but the bright line is worth it. If a fourth use case adds a second input struct (e.g., `DecideAlertInput`), it lives in this same file with the same discipline. Handler-DTO / service-input drift is detectable by a simple grep (both are in the same feature folder, both are small).

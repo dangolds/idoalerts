@@ -208,6 +208,66 @@ func NewAlertRepo() *AlertRepo
 
 **What this repo deliberately does not expose.** No `Delete`, no `Exists`, no `CompareAndSwap`, no streaming/channel `List`, no batch APIs, no in-memory indexes on filter fields. Atomicity of compound operations (read-check-write for decisions) is the **service** layer's concern per §2.8b — this repo provides per-method atomicity only. A production DB impl would close the decide-race with `SELECT ... FOR UPDATE`; for MVP the gap is documented and accepted.
 
+## Service Layer
+
+`internal/service/alert_service.go` (Story 9) owns the load-check-mutate-persist-publish orchestration for the four use cases. Handlers (future Story 14) stay dumb (parse → call → render); business rules are centralized here. See DesignAndBreakdown §2.1 / §2.7 / §2.7b / §2.8 / §2.8b / §2.9c / §9.13 for the underlying invariants.
+
+### Struct + constructor
+
+```go
+type AlertService struct {
+    repo   domain.AlertRepository
+    pub    domain.EventPublisher
+    logger *slog.Logger
+}
+
+func NewAlertService(repo domain.AlertRepository, pub domain.EventPublisher, logger *slog.Logger) *AlertService
+```
+
+`AlertService` is an orchestrator, not a port-implementer — **no `var _ ... = (*AlertService)(nil)` compile-time guard** (those belong on the infrastructure adapters that satisfy domain ports, not on the service that consumes ports). The constructor does not defensive-nil-check its args; composition-root wiring guarantees non-nil values and a `nil` at that seam should panic loudly on first call, not silently no-op behind a guard. The injected `*slog.Logger` is used **only** for publish-failure logging — request-level logging is owned by HTTP middleware (Story 13).
+
+### `CreateAlertInput`
+
+```go
+type CreateAlertInput struct {
+    TenantID, TransactionID, MatchedEntityName string
+    MatchScore                                 float64
+    AssignedTo                                 *string
+}
+```
+
+Plain Go fields — **no `json:` / `validate:` tags**. The type is the service-level input shape, not a wire DTO; validator tags live on the handler DTO (`CreateAlertRequest` in Story 11), keeping a two-DTO discipline with a bright line at the handler. Server-owned fields (`ID`, `Status`, `CreatedAt`, `UpdatedAt`, `DecisionNote`) are intentionally absent so §2.8's "service owns them, not handler or repo" invariant is enforced at the type level — a caller cannot smuggle a pre-populated ID into Create. See ADR **AM-6** for the full rationale.
+
+### Orchestration flows
+
+**`CreateAlert(ctx, in CreateAlertInput) (*Alert, error)`.** Generates `uuid.NewString()` for the ID. Sets `Status = StatusOpen`, `DecisionNote = ""` explicitly, and uses a single `now := time.Now().UTC()` value for both `CreatedAt` and `UpdatedAt` — two separate `time.Now()` calls could differ by nanoseconds and break the "equal on creation" invariant that downstream consumers (tests, auditors) may rely on. `DecisionNote = ""` carries the AM-2 invariant: the domain allows empty string (seeded/legacy/new alerts); the DTO still requires it at the wire boundary. Calls `repo.Create(ctx, a)` and propagates `ErrAlreadyExists` unchanged — a UUID collision is effectively unreachable, but honoring the port contract keeps the boundary clean. No event is emitted on Create per PRD (only decide + escalate emit). Returns the stored alert.
+
+**`ListAlerts(ctx, f ListFilter) ([]*Alert, error)`.** One-line pass-through to `repo.List`. The service trusts the port contract: tenant scoping, optional status / `minScore` filtering, deterministic `CreatedAt`-descending sort, and non-nil empty slice on zero matches (§9.1 / §9.12) are all repository-layer responsibilities. **No business logic belongs in this method** — adding any would duplicate repo behavior and create two sources of truth.
+
+**`DecideAlert(ctx, tenantID, id, newStatus, note) (*Alert, error)`.** Four-stage flow:
+1. **`newStatus` defense-in-depth guard** (top of method, before the load). If `newStatus` is not `StatusCleared` or `StatusConfirmedHit`, return `ErrInvalidTransition` immediately. The DTO `oneof=CLEARED CONFIRMED_HIT` validator protects the HTTP path, but the service is a package-boundary port callable from non-HTTP contexts (tests, future internal tools). An invalid `newStatus` slipping through would mutate Status back to OPEN on an OPEN alert and emit `{"decision":"OPEN"}`, corrupting the event audit stream.
+2. **Load + terminal-state disambiguation.** `FindByID` (repo collapses cross-tenant to `ErrNotFound` per §2.3 / §2.8a, so no cross-tenant existence leaks). Then `!CanDecide()` splits into two error codes: terminal status (`CLEARED` / `CONFIRMED_HIT`) returns `ErrAlreadyDecided` (409 write-once per §2.9c); any other non-decidable state returns `ErrInvalidTransition`. The "other" branch is unreachable today given the closed 4-status enum but guards future non-terminal non-decidable statuses (e.g., a hypothetical `ARCHIVED`) from being mislabeled "already decided." The §2.8b accepted read-check-write race comment sits inline at the `CanDecide` check — colocated with the race window, not abstracted into the method doc.
+3. **Mutate + persist (§2.7).** Set `Status`, `DecisionNote`, `UpdatedAt`, then `repo.Update`. If Update fails, return the error and **do NOT publish** — persist-before-publish is load-bearing.
+4. **Publish (§9.13, §2.7).** Build `AlertDecidedEvent` via struct literal at the call site (AM-4 single-source-of-truth: `Event: "alert.decided"` literal, no package const). `Timestamp = time.Now().UTC().Format(time.RFC3339)` at publish time — **never** `a.UpdatedAt.Format(...)`; "when the event fired" is semantically distinct from "when the entity last changed." `Decision: string(newStatus)`. On `Publish` error, log at ERROR via `logger.ErrorContext(ctx, ...)` with four typed fields (`alert_id`, `tenant_id`, `event`, `err`) and **return success with the updated alert** — repository state is authoritative; publish failure does not fail the operation. The §2.9c strict-write-once rule lives in the method-level doc comment (operation property, not a per-branch footnote).
+
+**`EscalateAlert(ctx, tenantID, id) (*Alert, error)`.** Same shape as Decide but with `CanEscalate` and `AlertEscalatedEvent`. `CanEscalate()` returns true only for `StatusOpen`, so any non-OPEN source state returns `ErrInvalidTransition`. The §2.8b race comment is echoed at the `CanEscalate` check site — the race window has the same shape as Decide, so the invariant is colocated with the code, not centralized elsewhere. Mutation: `Status = StatusEscalated` + `UpdatedAt = time.Now().UTC()`. Event struct literal uses `Event: "alert.escalated"` and the publish-time RFC3339 timestamp.
+
+### Event construction — struct literals, no helper
+
+Two call sites (decide, escalate) construct events inline via struct literal. No `buildDecidedEvent(...)` / `buildEscalatedEvent(...)` helper — DRY doesn't pay at N=2, and a helper would either have to accept the alert plus extra args (no simpler than inline) or hide the §9.13 `Timestamp` invariant behind a layer. The wire-critical field names (`AlertID` not `ID`, `Decision` not `Status`) are explicit at every literal; `go vet`'s struct-field typo check catches regressions at build time.
+
+### Publish-failure contract
+
+`Publish` returning a non-nil error logs once via `slog.ErrorContext` with exactly four fields — `alert_id`, `tenant_id`, `event` (e.g. `"alert.decided"`), `err` — and returns the updated alert with `nil` error to the caller. The rationale is §2.7: persist already succeeded, state is authoritative, and failing the client-facing operation after the DB commit would silently diverge storage state from the event stream. Only the `logger` field is ever used for structured output in this package; any `log.Printf` or `logger.Info` added elsewhere in the service file will fail review. Field cap is 4 — no request IDs (middleware owns those), no stack traces, no retry counters.
+
+### Imports
+
+`context`, `log/slog`, `time`, `github.com/google/uuid`, and the local `internal/domain` package — nothing else. In particular, the service does **not** import `internal/events` or `internal/storage/memory`: it depends on the ports (`domain.AlertRepository`, `domain.EventPublisher`, `domain.Event`), never on the adapters. This preserves the hexagonal direction (service → domain; adapters → domain; service never → adapters).
+
+### Testing (Story 10, pending)
+
+Covered in the **Testing** section below. The service is consumed with a real `memory.AlertRepo`, a fake publisher (in-memory event recorder satisfying `domain.EventPublisher`), and a discarding `slog.Logger` (`slog.New(slog.NewJSONHandler(io.Discard, nil))`) so publish-failure log lines do not pollute test output. No `internal/events` dependency in test code — the fake publisher is the contract surface.
+
 ## HTTP API (Planned — Stories 11–16)
 
 All endpoints emit the single error shape `{"error": "CODE", "message": "text"}` via one shared `api.writeError` helper.
